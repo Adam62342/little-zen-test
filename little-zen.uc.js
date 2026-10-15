@@ -72,7 +72,11 @@
   // 1. Intercept links opened from external applications
   // =====================================================================
   function hookBrowserDOMWindow() {
-    const bdw = window.browserDOMWindow;
+    // `window.browserDOMWindow` comes back as an XPCOM-wrapped native, whose
+    // properties can't be reassigned. Reach the underlying JS object (the real
+    // nsBrowserAccess instance) and patch that — calls dispatch to it either way.
+    const wrapper = window.browserDOMWindow;
+    const bdw = (wrapper && wrapper.wrappedJSObject) || wrapper;
     if (!bdw || bdw.__littleZenHooked) return;
     bdw.__littleZenHooked = true;
 

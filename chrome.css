@@ -1,0 +1,284 @@
+/* ==========================================================================
+   Little Zen — everything is scoped to :root[littlezen], so normal windows
+   are never touched.
+   ========================================================================== */
+
+:root[littlezen] {
+  --lz-bar-h: 46px;
+  --lz-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --lz-ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --lz-backdrop: light-dark(#cfd0d6, #0b0b0d);
+  --lz-bar-bg: color-mix(in srgb, Canvas 97%, CanvasText 3%);
+  --lz-fg: CanvasText;
+  --lz-fg-dim: color-mix(in srgb, CanvasText 55%, transparent);
+  --lz-chip: color-mix(in srgb, CanvasText 7%, transparent);
+  --lz-chip-hover: color-mix(in srgb, CanvasText 13%, transparent);
+
+  --lz-p: 0; /* swipe progress, 0..1, driven by JS */
+
+  --zen-sidebar-width: 0px;
+  --zen-element-separation: 0px;
+  color-scheme: light dark;
+  appearance: none !important;
+  -moz-appearance: none !important;
+  background: var(--lz-backdrop) !important;
+  overflow: hidden;
+}
+
+/* ---- Hide Zen's sidebar / toolbars; the Little Zen bar replaces them ------ */
+:root[littlezen] :is(
+  #navigator-toolbox,
+  #TabsToolbar,
+  #PersonalToolbar,
+  #zen-sidebar-splitter,
+  #zen-sidebar-top-buttons,
+  #zen-sidebar-web-panel,
+  #zen-sidebar-web-panel-splitter,
+  #zen-appcontent-navbar-container,
+  #sidebar-main,
+  #sidebar-box,
+  #sidebar-splitter
+) {
+  display: none !important;
+}
+
+/* ---- The "stage": body is what slides and shrinks ------------------------- */
+:root[littlezen] body {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100vh;
+  overflow: hidden;
+  transform-origin: 50% 50%;
+  transform: translate3d(calc(var(--lz-p) * 22px), 0, 0)
+             scale(calc(1 - var(--lz-p) * 0.055));
+  border-radius: calc(var(--lz-p) * 14px);
+  box-shadow: 0 calc(var(--lz-p) * 12px) calc(var(--lz-p) * 36px)
+              rgb(0 0 0 / calc(var(--lz-p) * 0.35));
+  will-change: transform;
+}
+
+:root[littlezen] body > :is(#zen-main-app-wrapper, #browser, #appcontent) {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Finger lifted without committing: glide back. */
+:root[littlezen][lz-settling] body {
+  transition: transform 0.42s var(--lz-ease-out),
+              border-radius 0.42s var(--lz-ease-out),
+              box-shadow 0.42s var(--lz-ease-out);
+}
+
+/* Committed: continue the same motion, then fade out. */
+:root[littlezen][lz-closing] body {
+  transition: transform 0.26s var(--lz-ease-in), opacity 0.26s var(--lz-ease-in);
+  transform: translate3d(46px, 0, 0) scale(0.9);
+  border-radius: 14px;
+  opacity: 0;
+}
+
+/* Entrance. */
+:root[littlezen][lz-entering] body {
+  animation: lz-in 0.3s var(--lz-ease-out) both;
+}
+@keyframes lz-in {
+  from { opacity: 0; transform: scale(0.965); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* ---- Close hint revealed on the left as the window slides right ----------- */
+#lz-hint {
+  display: none;
+}
+:root[littlezen] #lz-hint {
+  display: block;
+  position: fixed;
+  left: 14px;
+  top: 50%;
+  width: 30px;
+  height: 30px;
+  margin-top: -15px;
+  border-radius: 50%;
+  background: color-mix(in srgb, CanvasText 14%, transparent);
+  opacity: clamp(0, calc(var(--lz-p) * 1.6 - 0.2), 1);
+  transform: translateX(calc((1 - var(--lz-p)) * -12px))
+             scale(calc(0.6 + var(--lz-p) * 0.4));
+  pointer-events: none;
+  z-index: 0;
+}
+:root[littlezen][lz-settling] #lz-hint {
+  transition: opacity 0.3s var(--lz-ease-out), transform 0.3s var(--lz-ease-out),
+              background 0.2s;
+}
+:root[littlezen][lz-armed] #lz-hint {
+  background: light-dark(#e5484d, #ff6369);
+  transition: background 0.15s;
+}
+#lz-hint::before,
+#lz-hint::after {
+  content: "";
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 12px;
+  height: 2px;
+  margin: -1px 0 0 -6px;
+  border-radius: 1px;
+  background: CanvasText;
+}
+:root[littlezen][lz-armed] #lz-hint::before,
+:root[littlezen][lz-armed] #lz-hint::after {
+  background: white;
+}
+#lz-hint::before { transform: rotate(45deg); }
+#lz-hint::after  { transform: rotate(-45deg); }
+
+/* ---- Top bar: traffic lights, address field, "open in main window" ------- */
+#lz-bar {
+  display: none;
+}
+:root[littlezen] #lz-bar {
+  display: flex;
+  flex: 0 0 var(--lz-bar-h) !important;
+  align-items: center;
+  gap: 8px;
+  height: var(--lz-bar-h);
+  padding: 0 10px 0 0;
+  background: var(--lz-bar-bg);
+  color: var(--lz-fg);
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 9%, transparent);
+  font: 13px/1 system-ui, -apple-system, sans-serif;
+  -moz-window-dragging: drag;
+  position: relative;
+  user-select: none;
+}
+
+/* Room for the macOS traffic lights (when they overlay the content). */
+#lz-traffic {
+  flex: 0 0 78px;
+  height: 100%;
+}
+/* Popup-style windows may have a native titlebar instead. */
+:root[littlezen][lz-native-titlebar] #lz-traffic { display: none; }
+:root[littlezen][lz-native-titlebar] #lz-bar { padding-left: 10px; }
+
+.lz-btn {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--lz-fg);
+  -moz-window-dragging: no-drag;
+  transition: background 0.12s;
+}
+.lz-btn:hover { background: var(--lz-chip-hover); }
+.lz-btn:active { background: var(--lz-chip); }
+
+.lz-btn::before,
+#lz-lock::before {
+  content: "";
+  width: 17px;
+  height: 17px;
+  background: currentColor;
+  -webkit-mask: var(--lz-icon) center / contain no-repeat;
+  mask: var(--lz-icon) center / contain no-repeat;
+}
+#lz-lock::before { width: 12px; height: 12px; }
+
+#lz-open {
+  --lz-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+/* Address field: shows the host; click to edit the full URL. */
+#lz-pill {
+  flex: 1 1 auto;
+  max-width: 560px;
+  height: 30px;
+  margin: 0 auto;
+  padding: 0 12px;
+  border-radius: 9px;
+  background: var(--lz-chip);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  position: relative;
+  overflow: hidden;
+  -moz-window-dragging: no-drag;
+  cursor: text;
+  transition: background 0.12s, box-shadow 0.12s;
+}
+#lz-pill:hover { background: var(--lz-chip-hover); }
+
+#lz-lock {
+  display: grid;
+  place-items: center;
+  color: var(--lz-fg-dim);
+  --lz-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='5' y='11' width='14' height='9' rx='2' fill='black'/%3E%3Cpath d='M8 11V8a4 4 0 0 1 8 0v3' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+#lz-pill:not([secure]) #lz-lock { display: none; }
+
+#lz-host {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+#lz-input {
+  display: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0 12px;
+  border: none;
+  outline: none;
+  appearance: none;
+  background: var(--lz-bar-bg);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+#lz-pill[editing] {
+  background: var(--lz-bar-bg);
+  box-shadow: 0 0 0 2px AccentColor;
+}
+#lz-pill[editing] #lz-input { display: block; }
+#lz-pill[editing] :is(#lz-lock, #lz-host) { visibility: hidden; }
+
+/* Indeterminate load indicator along the bottom edge of the bar. */
+#lz-progress {
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  height: 2px;
+  width: 100%;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.2s;
+  pointer-events: none;
+}
+#lz-bar[loading] #lz-progress { opacity: 1; }
+#lz-progress::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 30%;
+  background: AccentColor;
+  border-radius: 2px;
+  animation: lz-load 1.1s var(--lz-ease-out) infinite;
+}
+@keyframes lz-load {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(340%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[littlezen][lz-entering] body { animation: none; }
+  :root[littlezen][lz-settling] body,
+  :root[littlezen][lz-closing] body { transition-duration: 0.01s; }
+}

@@ -1,0 +1,28 @@
+[
+  {
+    "property": "mod.littlezen.external_links",
+    "label": "Open links from other apps in a Little Zen window",
+    "type": "checkbox",
+    "defaultValue": true
+  },
+  {
+    "property": "mod.littlezen.swipe_to_close",
+    "label": "Swipe back with no history to close the window",
+    "type": "checkbox",
+    "defaultValue": true
+  },
+  {
+    "property": "mod.littlezen.width",
+    "label": "Window width (px)",
+    "type": "string",
+    "placeholder": "1000",
+    "defaultValue": "1000"
+  },
+  {
+    "property": "mod.littlezen.height",
+    "label": "Window height (px)",
+    "type": "string",
+    "placeholder": "700",
+    "defaultValue": "700"
+  }
+]

@@ -71,37 +71,116 @@
   // =====================================================================
   // 1. Intercept links opened from external applications
   // =====================================================================
+
+  // The flags argument tells us whether the open came from another app.
+  function isExternalOpenContext(flags) {
+    try {
+      return (
+        (flags & Ci.nsIBrowserDOMWindow.OPEN_EXTERNAL) !== 0 ||
+        (typeof flags === "number" &&
+          (flags & Ci.nsIWebNavigation.LOAD_FLAGS_FROM_EXTERNAL) !== 0)
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Spawn the little window by re-using the real implementation with
+  // OPEN_NEWWINDOW. This keeps the triggering principal + CSP intact and returns
+  // a valid BrowsingContext; our startup observer then shrinks & styles it.
+  function routeExternalToLittle(original, aURI, aOpenWindowInfo, aFlags, aTP, aCsp) {
+    pendingLittle++;
+    return original.openURI.call(
+      original,
+      aURI,
+      aOpenWindowInfo,
+      Ci.nsIBrowserDOMWindow.OPEN_NEWWINDOW,
+      aFlags,
+      aTP,
+      aCsp
+    );
+  }
+
+  // `window.browserDOMWindow` is exposed across an XPCOM boundary, so you can't
+  // reassign a method on it (that throws NS_ERROR_XPC_CANT_MODIFY_PROP_ON_WN).
+  // The reliable fix — proven by 12th-devs/little-zen — is to REPLACE the whole
+  // object with a plain JS wrapper that inherits from the original via __proto__
+  // and overrides only the open methods, plus QueryInterface so XPConnect still
+  // accepts it as an nsIBrowserDOMWindow.
   function hookBrowserDOMWindow() {
-    // `window.browserDOMWindow` comes back as an XPCOM-wrapped native, whose
-    // properties can't be reassigned. Reach the underlying JS object (the real
-    // nsBrowserAccess instance) and patch that — calls dispatch to it either way.
-    const wrapper = window.browserDOMWindow;
-    const bdw = (wrapper && wrapper.wrappedJSObject) || wrapper;
-    if (!bdw || bdw.__littleZenHooked) return;
-    bdw.__littleZenHooked = true;
+    if (window.__littleZenDOMWindowPatched) return;
+    const original = window.browserDOMWindow;
+    if (!original) {
+      warn("no browserDOMWindow yet; skipping external-link hook");
+      return;
+    }
 
-    const origOpenURI = bdw.openURI.bind(bdw);
+    const wrapper = {
+      __proto__: original,
 
-    bdw.openURI = function (aURI, aOpenWindowInfo, aWhere, aFlags, aTriggeringPrincipal, aCsp) {
-      try {
-        const EXTERNAL = Ci.nsIBrowserDOMWindow.OPEN_EXTERNAL;
-        if (getBool(PREF.enabled, true) && (aFlags & EXTERNAL) && isWebURI(aURI)) {
-          // Re-route to a brand new window; our observer will shrink & style it.
-          pendingLittle++;
-          return origOpenURI(
-            aURI,
-            aOpenWindowInfo,
-            Ci.nsIBrowserDOMWindow.OPEN_NEWWINDOW,
-            aFlags,
-            aTriggeringPrincipal,
-            aCsp
-          );
+      openURI(aURI, aOpenWindowInfo, aWhere, aFlags, aTriggeringPrincipal, aCsp) {
+        try {
+          if (getBool(PREF.enabled, true) && isExternalOpenContext(aFlags) && isWebURI(aURI)) {
+            return routeExternalToLittle(original, aURI, aOpenWindowInfo, aFlags, aTriggeringPrincipal, aCsp);
+          }
+        } catch (e) {
+          warn("openURI hook failed, falling back to default", e);
         }
-      } catch (e) {
-        warn("openURI hook failed, falling back to default", e);
-      }
-      return origOpenURI(aURI, aOpenWindowInfo, aWhere, aFlags, aTriggeringPrincipal, aCsp);
+        return original.openURI.call(original, aURI, aOpenWindowInfo, aWhere, aFlags, aTriggeringPrincipal, aCsp);
+      },
+
+      openURIInFrame(aURI, aParams, aWhere, aFlags, aName) {
+        try {
+          if (getBool(PREF.enabled, true) && isExternalOpenContext(aFlags) && isWebURI(aURI)) {
+            routeExternalToLittle(original, aURI, null, aFlags, aParams?.triggeringPrincipal, aParams?.csp);
+            return null;
+          }
+        } catch (e) {
+          warn("openURIInFrame hook failed, falling back to default", e);
+        }
+        return original.openURIInFrame
+          ? original.openURIInFrame.call(original, aURI, aParams, aWhere, aFlags, aName)
+          : null;
+      },
+
+      QueryInterface(iid) {
+        if (iid.equals(Ci.nsIBrowserDOMWindow) || iid.equals(Ci.nsISupports)) {
+          return this;
+        }
+        if (typeof original.QueryInterface === "function") {
+          return original.QueryInterface(iid);
+        }
+        throw Components.Exception("", Components.results.NS_ERROR_NO_INTERFACE);
+      },
     };
+
+    window._littleZenOriginalBrowserDOMWindow = original;
+    window.browserDOMWindow = wrapper;
+    window.__littleZenDOMWindowPatched = true;
+    log("external-link interception installed");
+  }
+
+  // Keep little windows out of "most recent window" lookups, so external links
+  // and other chrome always route from a normal window.
+  function patchBrowserWindowTracker() {
+    try {
+      const { BrowserWindowTracker } = ChromeUtils.importESModule(
+        "resource:///modules/BrowserWindowTracker.sys.mjs"
+      );
+      if (BrowserWindowTracker.__littleZenPatched) return;
+      const origGetTop = BrowserWindowTracker.getTopWindow.bind(BrowserWindowTracker);
+      BrowserWindowTracker.getTopWindow = function (options = {}) {
+        const top = origGetTop(options);
+        if (!top || !isLittle(top)) return top;
+        for (const w of BrowserWindowTracker.orderedWindows) {
+          if (w !== top && !isLittle(w) && !w.closed) return w;
+        }
+        return top;
+      };
+      BrowserWindowTracker.__littleZenPatched = true;
+    } catch (e) {
+      warn("getTopWindow patch failed", e);
+    }
   }
 
   // =====================================================================
@@ -390,6 +469,7 @@
   // =====================================================================
   function init() {
     try { hookBrowserDOMWindow(); } catch (e) { warn("init hook failed", e); }
+    try { patchBrowserWindowTracker(); } catch (e) { warn("init tracker patch failed", e); }
     Services.obs.addObserver(windowObserver, "browser-delayed-startup-finished");
     window.addEventListener(
       "unload",

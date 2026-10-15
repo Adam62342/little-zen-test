@@ -6,7 +6,7 @@
   "use strict";
 
   if (window.__littleZen) return;
-  window.__littleZen = { version: "1.0.2" };
+  window.__littleZen = { version: "1.0.3" };
 
   const HTML = "http://www.w3.org/1999/xhtml";
   const PREFIX = "little-zen-";
@@ -87,39 +87,53 @@
 
   // Intercept links handed to us by other apps (Mail, Slack, Terminal, ...).
   function hookExternalLinks(attempt = 0) {
-    const access = window.browserDOMWindow;
-    if (!access) {
+    const original = window.browserDOMWindow;
+    if (!original) {
       // Not assigned yet; retry for a few seconds.
       if (attempt < 20) setTimeout(() => hookExternalLinks(attempt + 1), 500);
       else log("window.browserDOMWindow never appeared; external links NOT hooked");
       return;
     }
-
-    // BrowserDOMWindow is a shared class in modern Firefox, so patch its
-    // prototype once. Falls back to the instance if there's no usable prototype.
-    const proto = Object.getPrototypeOf(access);
-    const target =
-      proto && Object.prototype.hasOwnProperty.call(proto, "openURI") ? proto : access;
-
-    const current = target.openURI;
-    if (typeof current !== "function") {
-      log("browserDOMWindow.openURI is not a function; cannot hook");
-      return;
-    }
-    if (current.__lz) {
+    if (original.__lz) {
       log("hook already present");
       return;
     }
 
-    const original = current;
-    const wrapper = function (uri, ...rest) {
+    // Firefox's BrowserDOMWindow methods are read-only, so instead of patching
+    // them we swap in a delegate that forwards everything to the original and
+    // only intercepts openURI.
+    const delegate = {
+      QueryInterface: ChromeUtils.generateQI(["nsIBrowserDOMWindow"]),
+      __lz: true,
+    };
+    const seen = new Set(["constructor", "QueryInterface", "__lz"]);
+    for (let o = original; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+      for (const key of Reflect.ownKeys(o)) {
+        if (typeof key !== "string" || seen.has(key)) continue;
+        seen.add(key);
+        const desc = Object.getOwnPropertyDescriptor(o, key);
+        if (!desc) continue;
+        if (typeof desc.value === "function") {
+          delegate[key] = (...args) => original[key](...args);
+        } else if (desc.get || desc.set) {
+          Object.defineProperty(delegate, key, {
+            enumerable: true,
+            get: () => original[key],
+            set: v => { original[key] = v; },
+          });
+        }
+      }
+    }
+    log("forwarding methods:", [...seen].filter(k => typeof delegate[k] === "function").join(", "));
+
+    delegate.openURI = function (uri, ...rest) {
       try {
         const [, where, flags] = rest;
         const external = !!(flags & Ci.nsIBrowserDOMWindow.OPEN_EXTERNAL);
         log("openURI", uri?.spec, "where:", where, "flags:", flags, "external:", external);
 
         if (uri && external && (uri.schemeIs("http") || uri.schemeIs("https"))) {
-          // `this` is shared across windows, so route through the frontmost one.
+          // Route through the frontmost window (it may be a different one).
           const top = BrowserWindowTracker.getTopWindow({ allowPopups: true });
           const api = top && !top.closed ? top.__littleZen : null;
           if (!api?.open) {
@@ -137,14 +151,15 @@
       } catch (e) {
         console.error("[Little Zen] external link hook failed:", e, e?.stack);
       }
-      return original.call(this, uri, ...rest);
+      return original.openURI(uri, ...rest);
     };
-    wrapper.__lz = true;
-    target.openURI = wrapper;
+    delegate.openURI.__lz = true;
 
-    const verified = window.browserDOMWindow.openURI === wrapper;
-    log("external link hook installed on", target === proto ? "prototype" : "instance",
-        "| verified:", verified);
+    window.browserDOMWindow = delegate;
+
+    let verified = false;
+    try { verified = window.browserDOMWindow?.__lz === true; } catch { /* ignore */ }
+    log("external link hook installed (delegate swap) | verified:", verified);
   }
 
   // ------------------------------------------------------------ little window
@@ -366,8 +381,10 @@
   const start = () => {
     window.__littleZen.open = openLittle;
     window.__littleZen.enabled = () => getBool(PREF.external, true);
-    hookExternalLinks();
-    if (isLittle) initLittle();
+    try { hookExternalLinks(); } catch (e) { console.error("[Little Zen] hook failed:", e, e?.stack); }
+    if (isLittle) {
+      try { initLittle(); } catch (e) { console.error("[Little Zen] init failed:", e, e?.stack); }
+    }
   };
 
   if (window.gBrowserInit?.delayedStartupFinished) {

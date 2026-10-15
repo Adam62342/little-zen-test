@@ -1,0 +1,14 @@
+{
+  "id": "7c1d3a52-4b8e-4f0a-9c6d-2e5a1b8f3d90",
+  "name": "Little Zen",
+  "description": "Arc-style Little Arc for Zen: links from other apps open in a compact floating window. Swipe back with no history to close it, with an animated shrink-and-slide.",
+  "homepage": "https://github.com/YOUR-USERNAME/little-zen",
+  "style": "https://raw.githubusercontent.com/YOUR-USERNAME/little-zen/main/chrome.css",
+  "readme": "https://raw.githubusercontent.com/YOUR-USERNAME/little-zen/main/README.md",
+  "image": "",
+  "author": "you",
+  "version": "1.0.0",
+  "tags": ["macos", "arc", "windows", "gestures"],
+  "createdAt": "2026-10-15",
+  "updatedAt": "2026-10-15"
+}

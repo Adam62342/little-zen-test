@@ -53,9 +53,6 @@
   const log = (...a) => { try { console.log("[little-zen]", ...a); } catch (_) {} };
   const warn = (...a) => { try { console.warn("[little-zen]", ...a); } catch (_) {} };
 
-  // How many little windows we've asked Zen to open and are still waiting to tag.
-  let pendingLittle = 0;
-
   function isLittle(win) {
     try { return win.document.documentElement.getAttribute(ATTR) === "true"; }
     catch (_) { return false; }
@@ -85,20 +82,32 @@
     }
   }
 
-  // Spawn the little window by re-using the real implementation with
-  // OPEN_NEWWINDOW. This keeps the triggering principal + CSP intact and returns
-  // a valid BrowsingContext; our startup observer then shrinks & styles it.
-  function routeExternalToLittle(original, aURI, aOpenWindowInfo, aFlags, aTP, aCsp) {
-    pendingLittle++;
-    return original.openURI.call(
-      original,
-      aURI,
-      aOpenWindowInfo,
-      Ci.nsIBrowserDOMWindow.OPEN_NEWWINDOW,
-      aFlags,
-      aTP,
-      aCsp
-    );
+  // Open an EMPTY new browser window and stash what it should become. We can't
+  // reliably hand the URL to openURI(OPEN_NEWWINDOW) — Zen lands the window on
+  // its empty-tab state and the navigation is lost (hence the earlier blank
+  // window). Instead we open the window, then load the URL ourselves once its
+  // <browser> is ready (see loadIntoLittle), exactly like 12th-devs/little-zen.
+  function openLittleWindow(url, principal) {
+    let win = null;
+    try {
+      if (typeof window.OpenBrowserWindow === "function") {
+        win = window.OpenBrowserWindow({});
+      }
+    } catch (e) {
+      warn("OpenBrowserWindow failed, trying openDialog", e);
+    }
+    if (!win) {
+      try {
+        win = window.openDialog(BROWSER_URL, "_blank", "chrome,all,dialog=no");
+      } catch (e) {
+        warn("openDialog failed", e);
+      }
+    }
+    if (win) {
+      // Expando survives until the window's startup observer picks it up.
+      win.__littleZenInit = { url, principal };
+    }
+    return win;
   }
 
   // `window.browserDOMWindow` is exposed across an XPCOM boundary, so you can't
@@ -121,7 +130,8 @@
       openURI(aURI, aOpenWindowInfo, aWhere, aFlags, aTriggeringPrincipal, aCsp) {
         try {
           if (getBool(PREF.enabled, true) && isExternalOpenContext(aFlags) && isWebURI(aURI)) {
-            return routeExternalToLittle(original, aURI, aOpenWindowInfo, aFlags, aTriggeringPrincipal, aCsp);
+            openLittleWindow(aURI.spec, aTriggeringPrincipal);
+            return null;
           }
         } catch (e) {
           warn("openURI hook failed, falling back to default", e);
@@ -132,7 +142,7 @@
       openURIInFrame(aURI, aParams, aWhere, aFlags, aName) {
         try {
           if (getBool(PREF.enabled, true) && isExternalOpenContext(aFlags) && isWebURI(aURI)) {
-            routeExternalToLittle(original, aURI, null, aFlags, aParams?.triggeringPrincipal, aParams?.csp);
+            openLittleWindow(aURI.spec, aParams?.triggeringPrincipal);
             return null;
           }
         } catch (e) {
@@ -189,14 +199,13 @@
   const windowObserver = {
     observe(subject, topic) {
       if (topic !== "browser-delayed-startup-finished") return;
-      if (pendingLittle <= 0) return;
       const win = subject;
       try {
-        if (!win || win === window) return;
-        if (!win.gBrowser) return;
-        if (win.location && win.location.href !== BROWSER_URL) return;
-        pendingLittle--;
+        if (!win || win === window || !win.__littleZenInit) return;
+        const { url, principal } = win.__littleZenInit;
+        delete win.__littleZenInit;
         makeLittle(win);
+        loadIntoLittle(win, url, principal);
       } catch (e) {
         warn("failed to shape little window", e);
       }
@@ -220,10 +229,68 @@
       warn("could not size/position little window", e);
     }
 
+    positionLittleWindowNavbar(win);
     injectChrome(win);
     installSwipeToClose(win);
     installKeyAndFocus(win);
     log("little window ready");
+  }
+
+  // Relocate the nav/URL bar above the page content and pull back/forward/reload
+  // in front of it, so once CSS hides the vertical-tab sidebar the little window
+  // still has a usable top toolbar. Mirrors 12th-devs/little-zen. Sets a marker
+  // attribute so the stylesheet knows the relocation succeeded.
+  function positionLittleWindowNavbar(win) {
+    const d = win.document;
+    let moved = false;
+    try {
+      const navBar = d.getElementById("nav-bar");
+      const navContainer = d.getElementById("zen-appcontent-navbar-container");
+      if (navBar && navContainer) {
+        if (navBar.parentElement !== navContainer) navContainer.appendChild(navBar);
+        moved = true;
+      }
+      const target = d.getElementById("nav-bar-customization-target");
+      const urlbar = d.getElementById("urlbar-container");
+      if (target && urlbar && urlbar.parentElement === target) {
+        for (const id of ["back-button", "forward-button", "stop-reload-button"]) {
+          const item = d.getElementById(id);
+          if (item) target.insertBefore(item, urlbar);
+        }
+      }
+    } catch (e) {
+      warn("navbar reposition failed", e);
+    }
+    try { d.documentElement.toggleAttribute("littlezen-navbar-moved", moved); } catch (_) {}
+  }
+
+  // Load the external URL once the fresh window has a <browser> to load into.
+  function loadIntoLittle(win, url, principal) {
+    if (!url) return;
+    const tp = principal || Services.scriptSecurityManager.getSystemPrincipal();
+    const loadFlags =
+      Ci.nsIWebNavigation.LOAD_FLAGS_ALLOW_THIRD_PARTY_FIXUP ??
+      Ci.nsIWebNavigation.LOAD_FLAGS_NONE;
+
+    const attempt = (n) => {
+      if (win.closed) return;
+      const browser = win.gBrowser && win.gBrowser.selectedBrowser;
+      if (!browser || !browser.browsingContext) {
+        if (n < 40) win.setTimeout(() => attempt(n + 1), 50);
+        else warn("gave up waiting for little window browser");
+        return;
+      }
+      try {
+        browser.browsingContext.loadURI(Services.io.newURI(url), {
+          triggeringPrincipal: tp,
+          loadFlags,
+        });
+        log("loaded into little window", url);
+      } catch (e) {
+        warn("load into little window failed", e);
+      }
+    };
+    attempt(0);
   }
 
   // =====================================================================
@@ -246,9 +313,6 @@
     promote.addEventListener("command", doPromote);
     promote.addEventListener("click", doPromote);
 
-    const spacer = doc.createXULElement("spacer");
-    spacer.setAttribute("flex", "1");
-
     const close = doc.createXULElement("toolbarbutton");
     close.id = "littlezen-close";
     close.classList.add("littlezen-btn");
@@ -259,7 +323,6 @@
     close.addEventListener("click", doClose);
 
     bar.appendChild(promote);
-    bar.appendChild(spacer);
     bar.appendChild(close);
     doc.documentElement.appendChild(bar);
   }

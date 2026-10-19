@@ -170,6 +170,7 @@
           const result = details && details.result;
           if (!result || result.providerName !== this.name) return;
           const q = result.payload && result.payload.query;
+          console.log("[query-launcher] engagement →", q);
           if (q) go(q);
           try { gURLBar.view.close(); } catch (e) {}
           try { gURLBar.blur(); } catch (e) {}
@@ -183,6 +184,12 @@
   function register() {
     if (UrlbarProvidersManager.__queryLauncher) return;
     try { UrlbarResult.addDynamicResultType(DT); } catch (e) {}
+    // the view template must be registered on the UrlbarView class, or dynamic rows render as a
+    // generic fallback (magnifying glass) and don't use our layout. Reach the class via the live view.
+    try {
+      const UrlbarView = gURLBar?.view?.constructor;
+      if (UrlbarView?.addDynamicViewTemplate) UrlbarView.addDynamicViewTemplate(DT, TEMPLATE);
+    } catch (e) { console.warn("[query-launcher] view template registration failed", e); }
     UrlbarProvidersManager.registerProvider(makeProvider());
     UrlbarProvidersManager.__queryLauncher = true;
   }
@@ -190,11 +197,12 @@
   function init(tries) {
     try {
       if (!loadModules()) throw new Error("urlbar modules not ready");
+      if (!gURLBar || !gURLBar.view || !gURLBar.view.constructor) throw new Error("urlbar view not ready");
       register();
       injectCSS(document);
-      console.log("[query-launcher] loaded v1.0.0");
+      console.log("[query-launcher] loaded v1.0.1");
     } catch (e) {
-      if ((tries || 0) < 12) setTimeout(() => init((tries || 0) + 1), 800);
+      if ((tries || 0) < 15) setTimeout(() => init((tries || 0) + 1), 800);
       else console.warn("[query-launcher] init failed", e);
     }
   }

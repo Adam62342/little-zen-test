@@ -102,48 +102,60 @@
   };
 
   let UrlbarUtils, UrlbarProvider, UrlbarResult, UrlbarProvidersManager;
-  // Where these modules live has changed across Firefox versions: recent builds (which Zen tracks)
-  // use the moz-src:/// scheme; older ones use resource:///modules/. Try each, then window globals,
-  // then derive the provider base class from an already-registered provider. Log what worked.
-  const importAny = (paths) => {
-    for (const p of paths) { try { const m = ChromeUtils.importESModule(p); if (m) return [m, p]; } catch (e) {} }
-    return [null, null];
-  };
+  // Where these modules live varies by Firefox version (recent builds use moz-src:///, older ones
+  // resource:///modules/), and some are also exposed as window globals or reachable from the live
+  // urlbar. Try everything and log what worked, so a single reload tells us the real locations.
+  const candidates = (name) => [
+    `moz-src:///browser/components/urlbar/${name}.sys.mjs`,
+    `resource:///modules/${name}.sys.mjs`,
+    `resource://gre/modules/${name}.sys.mjs`,
+  ];
+  function tryImport(name) {
+    const errs = [];
+    for (const p of candidates(name)) {
+      try { const m = ChromeUtils.importESModule(p); if (m) return { m, path: p }; }
+      catch (e) { errs.push(p.split("/").slice(0, 3).join("/") + " → " + ((e && e.message) || e)); }
+    }
+    return { m: null, errs };
+  }
+  const win = (n) => { try { return window[n]; } catch (e) { return undefined; } };
+
   function loadModules() {
-    const tried = [];
-    const [uMod, uPath] = importAny([
-      "moz-src:///browser/components/urlbar/UrlbarUtils.sys.mjs",
-      "resource:///modules/UrlbarUtils.sys.mjs",
-    ]);
-    if (uMod) { UrlbarUtils = uMod.UrlbarUtils; UrlbarProvider = uMod.UrlbarProvider; tried.push("utils:" + uPath); }
-    else if (window.UrlbarUtils) { UrlbarUtils = window.UrlbarUtils; UrlbarProvider = window.UrlbarProvider; tried.push("utils:window"); }
+    const diag = {};
 
-    const [rMod, rPath] = importAny([
-      "moz-src:///browser/components/urlbar/UrlbarResult.sys.mjs",
-      "resource:///modules/UrlbarResult.sys.mjs",
-    ]);
-    UrlbarResult = (rMod && rMod.UrlbarResult) || window.UrlbarResult;
-    if (rPath) tried.push("result:" + rPath);
+    let r = tryImport("UrlbarUtils");
+    UrlbarUtils = (r.m && r.m.UrlbarUtils) || win("UrlbarUtils");
+    if (r.m && r.m.UrlbarProvider) UrlbarProvider = r.m.UrlbarProvider;
+    diag.UrlbarUtils = r.path || (UrlbarUtils ? "window" : r.errs);
 
-    const [pMod, pPath] = importAny([
-      "moz-src:///browser/components/urlbar/UrlbarProvidersManager.sys.mjs",
-      "resource:///modules/UrlbarProvidersManager.sys.mjs",
-    ]);
-    UrlbarProvidersManager = (pMod && pMod.UrlbarProvidersManager) || window.UrlbarProvidersManager;
-    if (!UrlbarProvider && pMod && pMod.UrlbarProvider) UrlbarProvider = pMod.UrlbarProvider;
-    if (pPath) tried.push("pm:" + pPath);
+    r = tryImport("UrlbarResult");
+    UrlbarResult = (r.m && r.m.UrlbarResult) || win("UrlbarResult");
+    diag.UrlbarResult = r.path || (UrlbarResult ? "window" : r.errs);
 
-    // last-ditch: walk up from a live provider to find the UrlbarProvider base class
+    r = tryImport("UrlbarProvidersManager");
+    UrlbarProvidersManager =
+      (r.m && r.m.UrlbarProvidersManager) || win("UrlbarProvidersManager") ||
+      (typeof gURLBar !== "undefined" && gURLBar.controller && gURLBar.controller.manager) || undefined;
+    if (!UrlbarProvider && r.m && r.m.UrlbarProvider) UrlbarProvider = r.m.UrlbarProvider;
+    diag.UrlbarProvidersManager = r.path || (UrlbarProvidersManager ? "window/controller" : r.errs);
+
+    if (!UrlbarProvider) {
+      UrlbarProvider = win("UrlbarProvider");
+      if (!UrlbarProvider) { const pr = tryImport("UrlbarProvider"); UrlbarProvider = pr.m && pr.m.UrlbarProvider; }
+    }
+    // last resort: walk up from a live provider to the base class (name-independent)
     if (!UrlbarProvider && UrlbarProvidersManager && UrlbarProvidersManager.providers && UrlbarProvidersManager.providers.length) {
-      let c = UrlbarProvidersManager.providers[0].constructor;
-      while (c && c.name !== "UrlbarProvider" && Object.getPrototypeOf(c)) c = Object.getPrototypeOf(c);
-      if (c && c.name === "UrlbarProvider") { UrlbarProvider = c; tried.push("provider:derived"); }
+      let base = UrlbarProvidersManager.providers[0].constructor;
+      for (let parent; (parent = Object.getPrototypeOf(base)) && parent !== Function.prototype; ) base = parent;
+      UrlbarProvider = base;
+      diag.UrlbarProvider = "derived:" + (base && base.name);
     }
 
     const ok = !!(UrlbarUtils && UrlbarProvider && UrlbarResult && UrlbarProvidersManager);
-    if (!ok) console.log("[query-launcher] modules:", { UrlbarUtils: !!UrlbarUtils, UrlbarProvider: !!UrlbarProvider, UrlbarResult: !!UrlbarResult, UrlbarProvidersManager: !!UrlbarProvidersManager, tried });
+    lastDiag = Object.assign(diag, { have: { UrlbarUtils: !!UrlbarUtils, UrlbarProvider: !!UrlbarProvider, UrlbarResult: !!UrlbarResult, UrlbarProvidersManager: !!UrlbarProvidersManager } });
     return ok;
   }
+  let lastDiag = null;
 
   // defined in a factory so the class body only evaluates after the base class is loaded
   function makeProvider() {
@@ -233,10 +245,10 @@
       if (!gURLBar || !gURLBar.view || !gURLBar.view.constructor) throw new Error("urlbar view not ready");
       register();
       injectCSS(document);
-      console.log("[query-launcher] loaded v1.0.2");
+      console.log("[query-launcher] loaded v1.0.3");
     } catch (e) {
-      if ((tries || 0) < 15) setTimeout(() => init((tries || 0) + 1), 800);
-      else console.warn("[query-launcher] init failed", e);
+      if ((tries || 0) < 15) { setTimeout(() => init((tries || 0) + 1), 800); return; }
+      console.warn("[query-launcher] init failed:", (e && e.message) || e, "— module lookup:", lastDiag);
     }
   }
   init(0);

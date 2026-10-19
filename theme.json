@@ -1,0 +1,14 @@
+{
+  "id": "5b0f6c1e-8d2a-4e7b-9a43-2f6d1c7e9b10",
+  "name": "Glance on Hold",
+  "description": "Click and hold a link for a moment to open it in Zen's Glance preview.",
+  "homepage": "https://github.com/YOUR_USERNAME/zen-glance-on-hold",
+  "style": "",
+  "readme": "https://raw.githubusercontent.com/YOUR_USERNAME/zen-glance-on-hold/main/readme.md",
+  "image": "",
+  "author": "YOUR_USERNAME",
+  "version": "1.0.0",
+  "tags": [],
+  "createdAt": "2026-10-19",
+  "updatedAt": "2026-10-19"
+}

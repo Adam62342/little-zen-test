@@ -9,7 +9,7 @@
   const DEFAULT_DELAY = 700;
   const MOVE_TOLERANCE = 8; // px the cursor may drift before the hold is cancelled
   const DEBUG = true; // logs to the Browser Console (Ctrl+Shift+J); set to false once it works
-  const log = (...a) => DEBUG && console.log("[Glance on Hold]", ...a);
+  const log = (...a) => DEBUG && console.log(`[Glance on Hold +${Math.round(performance.now())}ms]`, ...a);
   log("script loaded");
 
   const MSG_DOWN = "GlanceHold:Down";
@@ -94,7 +94,10 @@
   const clearTimer = () => { if (timer) { clearTimeout(timer); timer = null; } };
 
   const onMessage = (msg) => {
-    if (msg.name === MSG_CANCEL) return clearTimer();
+    if (msg.name === MSG_CANCEL) {
+      log("cancel received (mouse released or moved)", timer ? "- timer was still pending" : "- timer had already fired");
+      return clearTimer();
+    }
 
     // MSG_DOWN
     if (msg.target !== gBrowser.selectedBrowser) return;

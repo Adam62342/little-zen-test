@@ -1,0 +1,29 @@
+{
+  "id": "query-launcher",
+  "name": "Query Launcher",
+  "version": "1.0.0",
+  "description": "Pins a custom destination directly under your address-bar query — press ↓ then Enter (or click) to send what you typed to an AI, any URL, or another browser. Choose a website favicon or an SF Symbol / glyph as its icon.",
+  "author": "you",
+  "homepage": "https://github.com/YOUR_USERNAME/query-launcher",
+  "tags": [
+    "chrome",
+    "urlbar",
+    "search",
+    "ai"
+  ],
+  "fork": [
+    "zen"
+  ],
+  "style": {
+    "chrome": "chrome.css"
+  },
+  "preferences": "preferences.json",
+  "scripts": {
+    "query-launcher.uc.js": {
+      "include": [
+        "chrome://browser/content/browser.xhtml"
+      ],
+      "loadOrder": 10
+    }
+  }
+}

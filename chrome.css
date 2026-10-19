@@ -1,0 +1,26 @@
+/* Query Launcher — styling for the pinned urlbar row.
+   The script also injects these rules at runtime, so the mod works even if this file isn't loaded;
+   keeping them here lets you tweak the look without touching the script. */
+
+.urlbarView-row[dynamicType="querylauncher"] .urlbarView-row-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.altdest-iconbox {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-size: cover;
+  background-position: center;
+  border-radius: 3px;
+  font: 14px/1 -apple-system, "SF Pro Text", "SF Pro", system-ui, sans-serif;
+}
+
+.altdest-label { font-weight: 600; flex: none; }
+.altdest-query { opacity: 0.55; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.altdest-hint { margin-inline-start: auto; opacity: 0.5; font-size: 11px; flex: none; }

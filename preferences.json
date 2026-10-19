@@ -1,0 +1,68 @@
+[
+  {
+    "property": "mod.query-launcher.label",
+    "label": "Row label (shown next to the icon, e.g. \"Ask AI\")",
+    "type": "string",
+    "default": "Ask AI",
+    "defaultValue": "Ask AI"
+  },
+  {
+    "property": "mod.query-launcher.url",
+    "label": "Destination URL — use %s (or {query}) where your text goes; e.g. https://www.perplexity.ai/search?q=%s",
+    "type": "string",
+    "default": "https://www.perplexity.ai/search?q=%s",
+    "defaultValue": "https://www.perplexity.ai/search?q=%s"
+  },
+  {
+    "property": "mod.query-launcher.openin",
+    "label": "Open the destination in",
+    "type": "dropdown",
+    "default": "tab",
+    "defaultValue": "tab",
+    "options": [
+      { "label": "New tab", "value": "tab" },
+      { "label": "Current tab", "value": "current" },
+      { "label": "New window", "value": "window" },
+      { "label": "External app (macOS)", "value": "external" }
+    ]
+  },
+  {
+    "property": "mod.query-launcher.app",
+    "label": "External app name (macOS only, used when \"External app\" is selected), e.g. Google Chrome",
+    "type": "string",
+    "default": "",
+    "defaultValue": ""
+  },
+  {
+    "property": "mod.query-launcher.iconmode",
+    "label": "Row icon",
+    "type": "dropdown",
+    "default": "favicon",
+    "defaultValue": "favicon",
+    "options": [
+      { "label": "Website favicon", "value": "favicon" },
+      { "label": "SF Symbol / glyph", "value": "symbol" }
+    ]
+  },
+  {
+    "property": "mod.query-launcher.symbol",
+    "label": "Icon glyph (used in SF Symbol / glyph mode) — paste an SF Symbol from the SF Symbols app, or any emoji/character",
+    "type": "string",
+    "default": "✦",
+    "defaultValue": "✦"
+  },
+  {
+    "property": "mod.query-launcher.minlen",
+    "label": "Only show the row once you've typed at least this many characters",
+    "type": "string",
+    "default": "1",
+    "defaultValue": "1"
+  },
+  {
+    "property": "mod.query-launcher.index",
+    "label": "Row position (1 = directly below your typed query)",
+    "type": "string",
+    "default": "1",
+    "defaultValue": "1"
+  }
+]

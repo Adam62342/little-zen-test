@@ -1,0 +1,18 @@
+[
+  {
+    "property": "mod.glance_sites.list",
+    "label": "Websites (comma-separated, e.g. reddit.com, news.ycombinator.com)",
+    "type": "string",
+    "defaultValue": ""
+  },
+  {
+    "property": "mod.glance_sites.mode",
+    "label": "Which links open in Glance on those sites",
+    "type": "dropdown",
+    "defaultValue": "newtab",
+    "options": [
+      { "label": "Only links that would open a new tab", "value": "newtab" },
+      { "label": "All links", "value": "all" }
+    ]
+  }
+]

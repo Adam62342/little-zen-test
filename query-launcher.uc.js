@@ -124,20 +124,25 @@
     const diag = {};
 
     let r = tryImport("UrlbarUtils");
-    UrlbarUtils = (r.m && r.m.UrlbarUtils) || win("UrlbarUtils");
-    if (r.m && r.m.UrlbarProvider) UrlbarProvider = r.m.UrlbarProvider;
+    const uMod = r.m;
+    UrlbarUtils = (uMod && uMod.UrlbarUtils) || win("UrlbarUtils");
+    if (uMod && uMod.UrlbarProvider) UrlbarProvider = uMod.UrlbarProvider;
     diag.UrlbarUtils = r.path || (UrlbarUtils ? "window" : r.errs);
 
-    r = tryImport("UrlbarResult");
-    UrlbarResult = (r.m && r.m.UrlbarResult) || win("UrlbarResult");
-    diag.UrlbarResult = r.path || (UrlbarResult ? "window" : r.errs);
-
     r = tryImport("UrlbarProvidersManager");
+    const pmMod = r.m;
     UrlbarProvidersManager =
-      (r.m && r.m.UrlbarProvidersManager) || win("UrlbarProvidersManager") ||
+      (pmMod && pmMod.UrlbarProvidersManager) || win("UrlbarProvidersManager") ||
       (typeof gURLBar !== "undefined" && gURLBar.controller && gURLBar.controller.manager) || undefined;
-    if (!UrlbarProvider && r.m && r.m.UrlbarProvider) UrlbarProvider = r.m.UrlbarProvider;
+    if (!UrlbarProvider && pmMod && pmMod.UrlbarProvider) UrlbarProvider = pmMod.UrlbarProvider;
     diag.UrlbarProvidersManager = r.path || (UrlbarProvidersManager ? "window/controller" : r.errs);
+
+    // UrlbarResult: its own module in older builds, but may be re-exported from the modules above
+    r = tryImport("UrlbarResult");
+    UrlbarResult =
+      (r.m && r.m.UrlbarResult) || win("UrlbarResult") ||
+      (uMod && uMod.UrlbarResult) || (pmMod && pmMod.UrlbarResult) || undefined;
+    diag.UrlbarResult = r.path || (UrlbarResult ? "re-export/window" : r.errs);
 
     if (!UrlbarProvider) {
       UrlbarProvider = win("UrlbarProvider");
@@ -152,6 +157,14 @@
     }
 
     const ok = !!(UrlbarUtils && UrlbarProvider && UrlbarResult && UrlbarProvidersManager);
+    // if something's missing, record what each loaded module actually exports — reveals where
+    // UrlbarResult really lives in this build
+    if (!ok) {
+      diag.exports = {
+        utils: uMod ? Object.keys(uMod).join(",") : "(not loaded)",
+        providersManager: pmMod ? Object.keys(pmMod).join(",") : "(not loaded)",
+      };
+    }
     lastDiag = Object.assign(diag, { have: { UrlbarUtils: !!UrlbarUtils, UrlbarProvider: !!UrlbarProvider, UrlbarResult: !!UrlbarResult, UrlbarProvidersManager: !!UrlbarProvidersManager } });
     return ok;
   }
@@ -245,7 +258,7 @@
       if (!gURLBar || !gURLBar.view || !gURLBar.view.constructor) throw new Error("urlbar view not ready");
       register();
       injectCSS(document);
-      console.log("[query-launcher] loaded v1.0.3");
+      console.log("[query-launcher] loaded v1.0.4");
     } catch (e) {
       if ((tries || 0) < 15) { setTimeout(() => init((tries || 0) + 1), 800); return; }
       console.warn("[query-launcher] init failed:", (e && e.message) || e, "— module lookup:", lastDiag);

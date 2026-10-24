@@ -14,14 +14,25 @@
   const ARM_AT = 0.25;
   const HOLD_DELAY_MS = 380; // how long you must sit still to open the list
   const STILL_EPS = 0.02; // movement smaller than this counts as "holding"
-  const ROW_STEP = 0.03; // swipe distance per row while scrubbing (~16px)
-  const HYSTERESIS = 0.2; // extra fraction of a row to cross before switching
+
+  // Scrubbing works like a trackpad cursor: slow movement is precise, faster
+  // movement covers more rows. Speeds are in page-widths per second.
+  const ROW_STEP = 0.035; // swipe distance per row at slow speed (~19px)
+  const ACCEL_FROM = 0.15; // below this speed there's no acceleration
+  const ACCEL = 2.5; // extra gain per unit of speed above ACCEL_FROM
+  const ACCEL_MAX = 3; // gain tops out at 1 + ACCEL_MAX
+  const HYSTERESIS = 0.08; // extra fraction of a row to cross before switching
   const CANCEL_STEPS = 2; // rows to scrub above the top entry to cancel
-  const LOW_EDGE = 0.04; // near the screen edge: auto-scroll down the list
-  const HIGH_EDGE = 0.94; // far end of the swipe: auto-scroll up the list
-  const EDGE_DWELL_MS = 250; // must rest at an edge this long to auto-scroll
-  const EDGE_REPEAT_MS = 140;
-  const RELEASE_SPEED = 2.0; // page-widths/sec; faster = lift-off animation
+
+  // Resting near either end of the swipe range keeps scrolling, faster the
+  // deeper you push.
+  const LOW_EDGE = 0.06; // near the screen edge: scroll down the list
+  const HIGH_EDGE = 0.92; // far end of the swipe: scroll up the list
+  const EDGE_DWELL_MS = 150;
+  const EDGE_RATE_MIN = 5; // rows/sec at the start of the edge zone
+  const EDGE_RATE_MAX = 16; // rows/sec at the very end
+
+  const RELEASE_SPEED = 2.0; // faster than this is the lift-off snap; ignored
   const MAX_ROWS = 50;
   const BUBBLE = 50; // keep in sync with .dia-swipe-bubble size in CSS
   const ROW_H = 46; // keep in sync with .dia-swipe-row height in CSS
@@ -165,15 +176,18 @@
       holding: false,
       stillAt: 0,
       holdTimer: 0,
-      edgeTimer: 0,
+      edgeRaf: 0,
       edgeDwell: 0,
       edgeDir: 0,
-      slot: 0,
+      edgeT: 0,
+      pos: 0, // continuous scrub position, in rows
+      slot: 0, // row the highlight sits on (may be negative = cancel zone)
+      lastMag: 0,
+      lastT: 0,
       listH: 0,
+      highlight: null,
       entries: [],
       rows: [],
-      anchor: 0,
-      base: 0,
       sel: -1,
       samples: [],
       committed: false,
@@ -241,6 +255,8 @@
     if (!s.entries.length) return;
 
     s.list.replaceChildren();
+    s.highlight = h("div", { class: "dia-swipe-highlight" });
+    s.list.appendChild(s.highlight);
     s.rows = s.entries.map(entry => {
       const icon = h("img", { class: "dia-swipe-favicon", src: "page-icon:" + entry.url, alt: "" });
       icon.addEventListener("error", () => icon.setAttribute("broken", "true"));
@@ -270,9 +286,10 @@
 
     setProgress(1);
     s.holding = true;
-    s.anchor = s.mag;
-    s.base = 0;
+    s.pos = 0;
     s.slot = 0;
+    s.lastMag = s.mag;
+    s.lastT = performance.now();
     s.root.setAttribute("holding", "true");
     buzz(HAPTIC_STRONG);
     select(0, true);
@@ -285,50 +302,60 @@
     s.root.toggleAttribute("cancel", i < 0);
     if (s.rows[i]) {
       s.rows[i].setAttribute("selected", "true");
-      scrollToRow(i);
+      // The highlight glides between rows instead of jumping.
+      s.highlight.style.transform = `translateY(${LIST_PAD + i * ROW_H}px)`;
     }
     if (!silent) buzz(HAPTIC_TICK);
   }
 
-  // Scroll the list ourselves from known row geometry: the card is still
-  // animating its size when this first runs, so measured layout is unreliable.
-  // Keeps one neighbouring row visible above/below the selection.
-  function scrollToRow(i) {
+  // Keep the scrub position comfortably inside the visible part of the list.
+  // Driven by the continuous position, so the list moves with your fingers.
+  // Uses known row geometry because the card is still growing at first.
+  function followScroll() {
     const list = s.list;
-    const rowTop = LIST_PAD + i * ROW_H;
     const view = s.listH;
-    const cur = list.scrollTop;
-    let target = cur;
-    if (rowTop - ROW_H < cur) target = rowTop - ROW_H;
-    else if (rowTop + ROW_H * 2 > cur + view) target = rowTop + ROW_H * 2 - view;
-    target = Math.max(0, Math.min(target, list.scrollHeight - view));
-    if (target !== cur) list.scrollTo({ top: target, behavior: "smooth" });
+    const center = LIST_PAD + (Math.max(0, s.pos) + 0.5) * ROW_H;
+    const margin = Math.min(ROW_H * 1.5, view / 2 - ROW_H / 2);
+    const max = Math.max(0, LIST_PAD * 2 + s.rows.length * ROW_H - view);
+    let target = list.scrollTop;
+    if (center - margin < target) target = center - margin;
+    else if (center + margin > target + view) target = center + margin - view;
+    list.scrollTop = Math.max(0, Math.min(target, max));
   }
 
   // Swiping back toward the screen edge moves down the list; swiping further
   // out moves up. Scrubbing past the top entry cancels.
-  function recomputeSelection() {
+  function movePos(rows) {
     const lo = -CANCEL_STEPS;
     const hi = s.rows.length - 1;
-    let pos = s.base + (s.anchor - s.mag) / ROW_STEP;
-    // Clamp, shifting the base so reversing direction responds immediately.
-    if (pos < lo) {
-      s.base += lo - pos;
-      pos = lo;
-    } else if (pos > hi) {
-      s.base -= pos - hi;
-      pos = hi;
-    }
+    // Clamping the position itself means reversing responds immediately.
+    s.pos = Math.max(lo, Math.min(hi, s.pos + rows));
     // Only change rows once clearly past the midpoint, so a finger resting on
     // a boundary doesn't flicker between two rows.
-    if (Math.abs(pos - s.slot) > 0.5 + HYSTERESIS) {
-      s.slot = Math.max(lo, Math.min(hi, Math.round(pos)));
+    if (Math.abs(s.pos - s.slot) > 0.5 + HYSTERESIS) {
+      s.slot = Math.max(lo, Math.min(hi, Math.round(s.pos)));
     }
     select(s.slot < 0 ? (s.slot <= lo ? -1 : 0) : s.slot);
+    followScroll();
+    pushSample();
   }
 
-  // Auto-scroll only after resting at an edge, so the quick lift-off
-  // animation passing through the edge zone doesn't scroll the list.
+  function onHoldMove(mag) {
+    const now = performance.now();
+    const dm = mag - s.lastMag;
+    const dt = Math.max(4, now - s.lastT) / 1000;
+    s.lastMag = mag;
+    s.lastT = now;
+    s.mag = mag;
+    updateEdgeScroll();
+
+    const speed = Math.abs(dm) / dt;
+    if (speed > RELEASE_SPEED) return; // the lift-off snap, not your fingers
+    const gain = 1 + Math.min(ACCEL_MAX, Math.max(0, speed - ACCEL_FROM) * ACCEL);
+    movePos((-dm / ROW_STEP) * gain);
+  }
+
+  // Continuous auto-scroll while resting at either end of the swipe range.
   function updateEdgeScroll() {
     const dirn = s.mag <= LOW_EDGE ? 1 : s.mag >= HIGH_EDGE ? -1 : 0;
     if (dirn === s.edgeDir) return;
@@ -337,20 +364,28 @@
     if (!dirn) return;
     const g = s;
     g.edgeDwell = setTimeout(() => {
-      g.edgeTimer = setInterval(() => {
-        if (s !== g || !g.holding) return;
-        s.base += dirn;
-        recomputeSelection();
-        pushSample();
-      }, EDGE_REPEAT_MS);
+      g.edgeT = performance.now();
+      const tick = now => {
+        if (s !== g || !g.holding || !g.edgeDir) return;
+        const dt = Math.min(0.05, (now - g.edgeT) / 1000);
+        g.edgeT = now;
+        const depth =
+          g.edgeDir > 0
+            ? (LOW_EDGE - g.mag) / LOW_EDGE
+            : (g.mag - HIGH_EDGE) / (1 - HIGH_EDGE);
+        const rate = EDGE_RATE_MIN + Math.max(0, Math.min(1, depth)) * (EDGE_RATE_MAX - EDGE_RATE_MIN);
+        movePos(g.edgeDir * rate * dt);
+        g.edgeRaf = requestAnimationFrame(tick);
+      };
+      g.edgeRaf = requestAnimationFrame(tick);
     }, EDGE_DWELL_MS);
   }
 
   function stopEdgeScroll() {
     clearTimeout(s.edgeDwell);
-    clearInterval(s.edgeTimer);
+    cancelAnimationFrame(s.edgeRaf);
     s.edgeDwell = 0;
-    s.edgeTimer = 0;
+    s.edgeRaf = 0;
     s.edgeDir = 0;
   }
 
@@ -394,7 +429,7 @@
     s = null;
     clearTimeout(g.holdTimer);
     clearTimeout(g.edgeDwell);
-    clearInterval(g.edgeTimer);
+    cancelAnimationFrame(g.edgeRaf);
     if (!g.root) return;
     setTimeout(() => {
       g.root.setAttribute("leaving", "true");
@@ -418,10 +453,7 @@
 
     if (s.holding) {
       // Measure along the original direction only; crossing zero clamps.
-      s.mag = Math.max(0, e.delta * s.sign);
-      recomputeSelection();
-      updateEdgeScroll();
-      pushSample();
+      onHoldMove(Math.max(0, e.delta * s.sign));
       return;
     }
 

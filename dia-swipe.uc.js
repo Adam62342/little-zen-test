@@ -28,11 +28,15 @@
   // deeper you push.
   const LOW_EDGE = 0.06; // near the screen edge: scroll down the list
   const HIGH_EDGE = 0.92; // far end of the swipe: scroll up the list
-  const EDGE_DWELL_MS = 150;
+  const EDGE_DWELL_MS = 300; // long enough that the lift-off animation can't trigger it
   const EDGE_RATE_MIN = 5; // rows/sec at the start of the edge zone
   const EDGE_RATE_MAX = 16; // rows/sec at the very end
 
-  const RELEASE_SPEED = 2.0; // faster than this is the lift-off snap; ignored
+  // Lift-off detection: faster than this is Firefox animating the swipe away
+  // after your fingers leave the trackpad. On detection the list freezes on
+  // the row from LIFT_LOOKBACK_MS earlier.
+  const RELEASE_SPEED = 1.4; // page-widths/sec
+  const LIFT_LOOKBACK_MS = 150;
   const MAX_ROWS = 50;
   const BUBBLE = 50; // keep in sync with .dia-swipe-bubble size in CSS
   const ROW_H = 46; // keep in sync with .dia-swipe-row height in CSS
@@ -174,6 +178,7 @@
       mag: 0,
       armed: false,
       holding: false,
+      released: false,
       stillAt: 0,
       holdTimer: 0,
       edgeRaf: 0,
@@ -293,6 +298,7 @@
     s.root.setAttribute("holding", "true");
     buzz(HAPTIC_STRONG);
     select(0, true);
+    pushSample();
   }
 
   function select(i, silent) {
@@ -341,18 +347,43 @@
   }
 
   function onHoldMove(mag) {
+    if (s.released) return;
     const now = performance.now();
     const dm = mag - s.lastMag;
     const dt = Math.max(4, now - s.lastT) / 1000;
     s.lastMag = mag;
     s.lastT = now;
     s.mag = mag;
-    updateEdgeScroll();
 
+    // A sudden fast move means your fingers lifted and Firefox is animating
+    // the swipe away. Freeze the list on the row you were on before that.
     const speed = Math.abs(dm) / dt;
-    if (speed > RELEASE_SPEED) return; // the lift-off snap, not your fingers
+    if (speed > RELEASE_SPEED) {
+      release(now);
+      return;
+    }
+
+    updateEdgeScroll();
     const gain = 1 + Math.min(ACCEL_MAX, Math.max(0, speed - ACCEL_FROM) * ACCEL);
     movePos((-dm / ROW_STEP) * gain);
+  }
+
+  function release(now) {
+    s.released = true;
+    stopEdgeScroll();
+    const sel = selectionBefore(now - LIFT_LOOKBACK_MS);
+    if (sel !== s.sel) select(sel, true);
+  }
+
+  // The selection as it was at time t: the lift-off animation starts slowly,
+  // so the last few updates before it's detected also need undoing.
+  function selectionBefore(t) {
+    let sel = s.samples.length ? s.samples[0].sel : s.sel;
+    for (const sample of s.samples) {
+      if (sample.t > t) break;
+      sel = sample.sel;
+    }
+    return sel;
   }
 
   // Continuous auto-scroll while resting at either end of the swipe range.
@@ -366,7 +397,7 @@
     g.edgeDwell = setTimeout(() => {
       g.edgeT = performance.now();
       const tick = now => {
-        if (s !== g || !g.holding || !g.edgeDir) return;
+        if (s !== g || !g.holding || g.released || !g.edgeDir) return;
         const dt = Math.min(0.05, (now - g.edgeT) / 1000);
         g.edgeT = now;
         const depth =
@@ -410,7 +441,7 @@
   }
 
   function finishHold() {
-    const sel = settledSelection();
+    const sel = s.released ? s.sel : settledSelection();
     s.holding = false;
     stopEdgeScroll();
     suppressUntil = performance.now() + 800;

@@ -79,6 +79,18 @@
   box-shadow:
     0 0 0 0.5px var(--ds-ring),
     0 14px 36px var(--ds-shadow-strong);
+  /* The open list takes clicks; everywhere else still goes to the page. */
+  pointer-events: auto;
+  cursor: default;
+}
+
+.dia-swipe-bubble:focus,
+.dia-swipe-bubble:focus-visible {
+  outline: none;
+}
+
+.dia-swipe[leaving] .dia-swipe-bubble {
+  pointer-events: none;
 }
 
 /* ---- Arrow ---- */

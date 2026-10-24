@@ -1,6 +1,0 @@
-/* Alt Search — lets SF-symbol glyph icons follow the text colour */
-#urlbar .urlbarView-favicon[src*="sine-alt"] {
-  -moz-context-properties: fill;
-  fill: currentColor;
-  opacity: 0.8;
-}

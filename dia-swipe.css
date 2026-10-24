@@ -1,0 +1,203 @@
+/* Dia Swipe — chrome styles */
+
+/* Hide Firefox's built-in swipe arrow; it still runs underneath. */
+#historySwipeAnimationContainer {
+  opacity: 0 !important;
+}
+
+/* Fixed box laid over the visible page; position/size are set by the script.
+   Clipping makes the bubble slide in from the page edge. */
+.dia-swipe {
+  /* Light appearance */
+  --ds-surface: #fff;
+  --ds-text: #1c1c1e;
+  --ds-muted: #8e8e93;
+  --ds-ring: rgba(0, 0, 0, 0.08);
+  --ds-shadow: rgba(0, 0, 0, 0.18);
+  --ds-shadow-strong: rgba(0, 0, 0, 0.22);
+  --ds-selected: rgba(0, 0, 0, 0.07);
+
+  position: fixed;
+  z-index: 2147483647;
+  pointer-events: none;
+  overflow: hidden;
+  transition: opacity 0.22s ease;
+}
+
+/* Dark appearance: follows Zen's theme, which follows macOS by default. */
+@media (prefers-color-scheme: dark) {
+  .dia-swipe {
+    --ds-surface: #2c2c2e;
+    --ds-text: #f5f5f7;
+    --ds-muted: #98989d;
+    --ds-ring: rgba(255, 255, 255, 0.12);
+    --ds-shadow: rgba(0, 0, 0, 0.45);
+    --ds-shadow-strong: rgba(0, 0, 0, 0.55);
+    --ds-selected: rgba(255, 255, 255, 0.1);
+  }
+}
+
+.dia-swipe[leaving] {
+  opacity: 0;
+}
+
+/* ---- The bubble: a circle that morphs into the history card ---- */
+.dia-swipe-bubble {
+  position: absolute;
+  top: 0; /* set by the script */
+  left: 0;
+  width: 50px;
+  height: 50px;
+  border-radius: 25px;
+  overflow: hidden;
+  background: var(--ds-surface);
+  color: var(--ds-text);
+  box-shadow:
+    0 0 0 0.5px var(--ds-ring),
+    0 6px 18px var(--ds-shadow);
+  transform: translateX(-66px) scale(0.55);
+  opacity: 0;
+  will-change: transform, width, height;
+  transition:
+    width 0.34s cubic-bezier(0.32, 1.25, 0.5, 1),
+    height 0.34s cubic-bezier(0.32, 1.25, 0.5, 1),
+    border-radius 0.3s ease,
+    top 0.3s ease,
+    box-shadow 0.3s ease,
+    background-color 0.2s ease;
+}
+
+.dia-swipe[side="right"] .dia-swipe-bubble {
+  left: auto;
+  right: 0;
+}
+
+.dia-swipe[holding] .dia-swipe-bubble {
+  width: 336px;
+  height: var(--list-h, 200px);
+  border-radius: 18px;
+  box-shadow:
+    0 0 0 0.5px var(--ds-ring),
+    0 14px 36px var(--ds-shadow-strong);
+}
+
+/* ---- Arrow ---- */
+.dia-swipe-arrow {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  color: var(--ds-muted);
+  transition: color 0.12s ease, opacity 0.14s ease, scale 0.2s ease;
+}
+
+.dia-swipe[side="right"] .dia-swipe-arrow {
+  left: auto;
+  right: 12px;
+}
+
+.dia-swipe[nav="forward"] .dia-swipe-arrow {
+  transform: scaleX(-1);
+}
+
+.dia-swipe[armed] .dia-swipe-arrow {
+  color: var(--ds-text);
+  animation: dia-swipe-pop 0.24s cubic-bezier(0.3, 1.6, 0.5, 1);
+}
+
+.dia-swipe[holding] .dia-swipe-arrow {
+  opacity: 0;
+  scale: 0.6;
+  animation: none;
+}
+
+@keyframes dia-swipe-pop {
+  0% { scale: 1; }
+  45% { scale: 1.22; }
+  100% { scale: 1; }
+}
+
+.dia-swipe[committed] .dia-swipe-bubble {
+  transition: opacity 0.25s ease;
+  opacity: 0 !important;
+}
+
+/* ---- History list inside the card ---- */
+.dia-swipe-list {
+  position: absolute;
+  inset: 0;
+  width: 336px;
+  box-sizing: border-box;
+  padding: 7px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  font: menu;
+  font-size: 14px;
+  color: var(--ds-text);
+}
+
+.dia-swipe[side="right"] .dia-swipe-list {
+  left: auto;
+  right: 0;
+}
+
+.dia-swipe[holding] .dia-swipe-list {
+  opacity: 1;
+  transition-delay: 0.1s;
+}
+
+.dia-swipe[cancel] .dia-swipe-list {
+  opacity: 0.55;
+}
+
+.dia-swipe-row {
+  height: 46px; /* keep in sync with ROW_H in the script */
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 0 11px;
+  border-radius: 11px;
+  transition: background-color 0.08s ease;
+}
+
+.dia-swipe-row[selected] {
+  background: var(--ds-selected);
+}
+
+.dia-swipe-favicon {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border-radius: 3px;
+}
+
+.dia-swipe-favicon[broken] {
+  visibility: hidden;
+}
+
+.dia-swipe-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.dia-swipe-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+
+.dia-swipe-row[selected] .dia-swipe-title {
+  font-weight: 600;
+}
+
+.dia-swipe-host {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  color: var(--ds-muted);
+  margin-top: 1px;
+}

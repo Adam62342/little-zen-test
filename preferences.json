@@ -1,0 +1,20 @@
+[
+  {
+    "property": "mod.diaswipe.haptics",
+    "label": "Haptic tick when the arrow arms and while scrubbing the history list",
+    "type": "checkbox",
+    "default": true
+  },
+  {
+    "property": "mod.diaswipe.forward",
+    "label": "Show the bubble for forward swipes too",
+    "type": "checkbox",
+    "default": true
+  },
+  {
+    "property": "mod.diaswipe.hold_list",
+    "label": "Hold the swipe to open the history list",
+    "type": "checkbox",
+    "default": true
+  }
+]

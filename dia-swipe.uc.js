@@ -143,6 +143,20 @@
   // `s` is the current swipe, and stays alive while its list is open.
   let s = null;
   let suppressUntil = 0;
+  let gestureOutside = false; // current swipe started outside the web page
+
+  // Only swipes over the web page count; the sidebar and toolbars are left to
+  // Zen (e.g. its workspace-switching swipe).
+  function overContent(e) {
+    const panels = document.getElementById("tabbrowser-tabpanels") || gBrowser.tabpanels;
+    if (!panels) return true;
+    const t = e.target;
+    if (t?.nodeType === Node.ELEMENT_NODE && t !== document.documentElement) {
+      return panels.contains(t);
+    }
+    const r = panels.getBoundingClientRect();
+    return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+  }
 
   function fresh() {
     return {
@@ -341,6 +355,7 @@
 
   function update(e) {
     if (!s) s = fresh();
+    if (gestureOutside) return;
     if (s.open) return; // the list is up; the swipe no longer matters
 
     const mag = Math.abs(e.delta);
@@ -393,6 +408,7 @@
   }
 
   function onSwipeCommitted(e) {
+    if (gestureOutside) return; // Firefox's own Back is blocked separately
     if ((s && s.open) || performance.now() < suppressUntil) {
       // The list is open: don't let Firefox go back on lift-off.
       e.preventDefault();
@@ -414,7 +430,11 @@
 
   function dispatch(e) {
     switch (e.type) {
+      case "MozSwipeGestureMayStart":
+        gestureOutside = !overContent(e);
+        break;
       case "MozSwipeGestureStart":
+        gestureOutside = !overContent(e);
         begin();
         break;
       case "MozSwipeGestureUpdate":
@@ -433,19 +453,37 @@
     }
   }
 
-  const EVENTS = ["MozSwipeGestureStart", "MozSwipeGestureUpdate", "MozSwipeGestureEnd", "MozSwipeGesture"];
+  const EVENTS = [
+    "MozSwipeGestureMayStart",
+    "MozSwipeGestureStart",
+    "MozSwipeGestureUpdate",
+    "MozSwipeGestureEnd",
+    "MozSwipeGesture",
+  ];
+
+  // Stop Firefox's own swipe-to-go-back for swipes that started outside the
+  // page. Patching this one method, rather than swallowing the swipe events,
+  // leaves those events intact for Zen's sidebar gestures.
+  let origProcessSwipe = null; // captured in init(), once the browser is ready
+  function patchedProcessSwipe(aEvent, aDir) {
+    if (gestureOutside) return;
+    return origProcessSwipe.call(this, aEvent, aDir);
+  }
 
   function init() {
     // Window capture runs before Firefox's own handler on gBrowser.tabbox.
     for (const type of EVENTS) window.addEventListener(type, handleEvent, true);
     window.addEventListener("resize", handleEvent);
     gBrowser.tabContainer.addEventListener("TabSelect", handleEvent);
+    origProcessSwipe = gGestureSupport.processSwipeEvent;
+    gGestureSupport.processSwipeEvent = patchedProcessSwipe;
     window.DiaSwipe = {
       buzz,
       uninit() {
         for (const type of EVENTS) window.removeEventListener(type, handleEvent, true);
         window.removeEventListener("resize", handleEvent);
         gBrowser.tabContainer.removeEventListener("TabSelect", handleEvent);
+        gGestureSupport.processSwipeEvent = origProcessSwipe;
         close();
         delete window.DiaSwipe;
       },

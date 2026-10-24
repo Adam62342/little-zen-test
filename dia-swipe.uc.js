@@ -35,8 +35,11 @@
   // Lift-off detection: faster than this is Firefox animating the swipe away
   // after your fingers leave the trackpad. On detection the list freezes on
   // the row from LIFT_LOOKBACK_MS earlier.
-  const RELEASE_SPEED = 1.4; // page-widths/sec
+  const RELEASE_SPEED = 1.4; // page-widths/sec, sustained over two updates
   const LIFT_LOOKBACK_MS = 150;
+  const SPEED_WINDOW_MS = 50; // speed is averaged over this much time
+  const MIN_SPAN_MS = 16; // need at least this much history to judge speed
+  const UNFREEZE_EPS = 0.01; // moving back this far after a freeze = still touching
   const MAX_ROWS = 50;
   const BUBBLE = 50; // keep in sync with .dia-swipe-bubble size in CSS
   const ROW_H = 46; // keep in sync with .dia-swipe-row height in CSS
@@ -179,6 +182,10 @@
       armed: false,
       holding: false,
       released: false,
+      releaseDir: 1,
+      releaseExtreme: 0,
+      fastCount: 0,
+      recent: [],
       stillAt: 0,
       holdTimer: 0,
       edgeRaf: 0,
@@ -347,7 +354,6 @@
   }
 
   function onHoldMove(mag) {
-    if (s.released) return;
     const now = performance.now();
     const dm = mag - s.lastMag;
     const dt = Math.max(4, now - s.lastT) / 1000;
@@ -355,21 +361,45 @@
     s.lastT = now;
     s.mag = mag;
 
-    // A sudden fast move means your fingers lifted and Firefox is animating
-    // the swipe away. Freeze the list on the row you were on before that.
-    const speed = Math.abs(dm) / dt;
-    if (speed > RELEASE_SPEED) {
-      release(now);
+    // Speed over a short window, not between two updates: updates can arrive
+    // almost back-to-back, which makes a tiny move look extremely fast.
+    s.recent.push({ t: now, mag });
+    while (s.recent.length > 2 && now - s.recent[0].t > SPEED_WINDOW_MS) s.recent.shift();
+    const first = s.recent[0];
+    const span = now - first.t;
+    const windowSpeed = span >= MIN_SPAN_MS ? Math.abs(mag - first.mag) / (span / 1000) : 0;
+
+    if (s.released) {
+      // Firefox's lift-off animation only moves one way. Moving back against
+      // it means your fingers are still down, so unfreeze.
+      s.releaseExtreme =
+        s.releaseDir > 0 ? Math.max(s.releaseExtreme, mag) : Math.min(s.releaseExtreme, mag);
+      if ((s.releaseExtreme - mag) * s.releaseDir > UNFREEZE_EPS) {
+        s.released = false;
+        s.fastCount = 0;
+        s.recent = [{ t: now, mag }];
+      }
+      return;
+    }
+
+    // A sustained fast move means your fingers lifted and Firefox is
+    // animating the swipe away. Freeze on the row you were on before that.
+    s.fastCount = windowSpeed > RELEASE_SPEED ? s.fastCount + 1 : 0;
+    if (s.fastCount >= 2) {
+      release(now, Math.sign(mag - first.mag), mag);
       return;
     }
 
     updateEdgeScroll();
+    const speed = Math.min(windowSpeed || Math.abs(dm) / dt, RELEASE_SPEED);
     const gain = 1 + Math.min(ACCEL_MAX, Math.max(0, speed - ACCEL_FROM) * ACCEL);
     movePos((-dm / ROW_STEP) * gain);
   }
 
-  function release(now) {
+  function release(now, dir, mag) {
     s.released = true;
+    s.releaseDir = dir || 1;
+    s.releaseExtreme = mag;
     stopEdgeScroll();
     const sel = selectionBefore(now - LIFT_LOOKBACK_MS);
     if (sel !== s.sel) select(sel, true);

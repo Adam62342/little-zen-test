@@ -42,6 +42,20 @@
   opacity: 0;
 }
 
+/* Fingers lifted: the list stays up and covers the page, so the next
+   scroll, click or key goes to the list instead of the website. */
+.dia-swipe[parked] {
+  pointer-events: auto;
+}
+
+.dia-swipe-bubble:focus {
+  outline: none;
+}
+
+.dia-swipe[parked] .dia-swipe-row {
+  cursor: pointer;
+}
+
 /* ---- The bubble: a circle that morphs into the history card ---- */
 .dia-swipe-bubble {
   position: absolute;

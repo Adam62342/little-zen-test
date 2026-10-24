@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           Dia Swipe
-// @description    Dia-style swipe back/forward bubble; hold to open a history list
+// @description    Dia-style swipe back/forward bubble; hold to scrub through history
 // @include        main
 // ==/UserScript==
 
@@ -15,10 +15,35 @@
   const HOLD_DELAY_MS = 380; // how long you must sit still to open the list
   const STILL_EPS = 0.02; // movement smaller than this counts as "holding"
   const MAX_ROWS = 50;
+
+  // Scrubbing: the highlight stays put and the list slides under it.
+  const ROW_STEP = 0.04; // swipe distance per row (~22px of finger travel)
+  const MAGNET = 0.6; // 0 = no detents, 1 = strong pull toward each row
+  const SMOOTH_MS = 55; // how quickly the list catches up with your fingers
+  const RUBBER = 0.85; // how far (in rows) the list stretches past either end
+  const DISMISS_ROWS = 1.4; // pull this far past the newest entry to dismiss
+  const EDGE_AT = 0.97; // fingers at the far end of the swipe: keep scrolling
+  const EDGE_RATE_MIN = 4; // rows/sec when you first reach the end…
+  const EDGE_RATE_MAX = 14; // …ramping up to this
+  const EDGE_RAMP_S = 1.2;
+
+  // Card layout
   const BUBBLE = 50; // keep in sync with .dia-swipe-bubble size in CSS
   const ROW_H = 46; // keep in sync with .dia-swipe-row height in CSS
-  const LIST_PAD = 7;
-  const MAX_LIST_H = 430;
+  const PAD = 7;
+  const ROWS_ABOVE = 3; // older entries visible above the highlight
+  const ROWS_BELOW = 1; // newer entries visible below it
+
+  // While the list is open, make Firefox's swipe tracker report the real
+  // finger position. Normally it pins the value just under the threshold
+  // whenever your fingers move back, and lets speed decide the outcome, which
+  // makes scrubbing jumpy. With these, lifting your fingers above the
+  // threshold always "succeeds" (we pick the entry), and below it always
+  // springs back (we dismiss). Restored as soon as the list closes.
+  const SWIPE_PREFS = {
+    "widget.swipe.velocity-twitch-tolerance": "1000000",
+    "widget.swipe.success-velocity-contribution": "0",
+  };
 
   const BACK = "Browser:BackOrBackDuplicate";
   const FORWARD = "Browser:ForwardOrForwardDuplicate";
@@ -36,8 +61,10 @@
 
   // ---- Haptics ------------------------------------------------------------
   // macOS: call NSHapticFeedbackManager through js-ctypes, since Gecko doesn't
-  // expose trackpad haptics to chrome JS. Pattern 2 = "level change".
-  // Only fires on a Force Touch trackpad with fingers down.
+  // expose trackpad haptics to chrome JS. Pattern 1 = "alignment" (a light
+  // tick), 2 = "level change". Only fires on a Force Touch trackpad with
+  // fingers down.
+  const HAPTIC_TICK = 1;
   const HAPTIC_STRONG = 2;
 
   // Built lazily on first use so a ctypes problem can't affect startup.
@@ -75,6 +102,11 @@
   const buzz = pattern => {
     if (!boolPref("haptics", true)) return;
     try {
+      // Zen's own haptic service (used by its split view), when available.
+      if (typeof Services.zen?.playHapticFeedback === "function") {
+        Services.zen.playHapticFeedback();
+        return;
+      }
       haptic ??= loadHaptic();
       haptic(pattern);
     } catch (e) {
@@ -82,6 +114,35 @@
       haptic = () => {};
     }
   };
+
+  // ---- Swipe tracker prefs ------------------------------------------------
+  const savedSwipePrefs = new Map(); // name -> original string, or null = default
+
+  function overrideSwipePrefs() {
+    for (const [name, value] of Object.entries(SWIPE_PREFS)) {
+      try {
+        if (!savedSwipePrefs.has(name)) {
+          savedSwipePrefs.set(
+            name,
+            Services.prefs.prefHasUserValue(name) ? Services.prefs.getStringPref(name) : null
+          );
+        }
+        Services.prefs.setStringPref(name, value);
+      } catch (e) {
+        console.warn("Dia Swipe: couldn't adjust", name, e);
+      }
+    }
+  }
+
+  function restoreSwipePrefs() {
+    for (const [name, original] of savedSwipePrefs) {
+      try {
+        if (original === null) Services.prefs.clearUserPref(name);
+        else Services.prefs.setStringPref(name, original);
+      } catch (e) {}
+    }
+    savedSwipePrefs.clear();
+  }
 
   // ---- DOM helpers --------------------------------------------------------
   function h(tag, attrs = {}, ...children) {
@@ -139,10 +200,23 @@
     }
   }
 
+  // Pinned tabs: when one is restored (reopened after being unloaded, after a
+  // restart, or reset to its pinned page), start it with no back history.
+  function onTabRestored(e) {
+    const tab = e.target;
+    if (!tab?.pinned || !boolPref("clear_pinned_history", true)) return;
+    try {
+      const sh = tab.linkedBrowser?.browsingContext?.sessionHistory;
+      // Removes the entries before the current one; forward history stays.
+      if (sh && sh.index > 0) sh.purgeHistory(sh.index);
+    } catch (err) {
+      console.warn("Dia Swipe: couldn't clear pinned tab history", err);
+    }
+  }
+
   // ---- State ----------------------------------------------------------------
-  // `s` is the current swipe, and stays alive while its list is open.
+  // `s` is the current swipe gesture.
   let s = null;
-  let suppressUntil = 0;
   let gestureOutside = false; // current swipe started outside the web page
 
   // Only swipes over the web page count; the sidebar and toolbars are left to
@@ -163,18 +237,27 @@
       root: null,
       bubble: null,
       list: null,
-      highlight: null,
+      track: null,
       height: 0,
       dir: null, // "back" | "forward" | null
       side: null, // "left" | "right"
+      sign: 1, // sign of delta for the current direction
       mag: 0,
       armed: false,
-      open: false, // history list is showing
       stillAt: 0,
       holdTimer: 0,
+      // Scrubbing
+      open: false, // history list is showing
+      dismissed: false, // list was swiped away; ignore the rest of this gesture
       entries: [],
       rows: [],
-      sel: -1,
+      anchor: 0, // swipe position when the list opened
+      extra: 0, // rows added by resting at the far end
+      edgeHeld: 0,
+      display: 0, // where the list is drawn, in rows (eased)
+      sel: 0,
+      raf: 0,
+      lastFrame: 0,
       committed: false,
     };
   }
@@ -197,7 +280,7 @@
     const rect = gBrowser.selectedBrowser.getBoundingClientRect();
     if (!rect.width || !rect.height) return false;
     s.list = h("div", { class: "dia-swipe-list" });
-    s.bubble = h("div", { class: "dia-swipe-bubble", tabindex: "-1" }, arrowIcon(), s.list);
+    s.bubble = h("div", { class: "dia-swipe-bubble" }, arrowIcon(), s.list);
     s.root = h("div", { class: "dia-swipe" }, s.bubble);
     Object.assign(s.root.style, {
       left: `${rect.left}px`,
@@ -234,14 +317,21 @@
     s.holdTimer = setTimeout(openList, HOLD_DELAY_MS);
   }
 
+  // Older pages sit above the highlight and newer ones below. Swiping further
+  // pulls older pages down into the highlight; swiping back brings newer ones
+  // up, and pulling past the newest dismisses the list.
   function openList() {
-    if (!s || !s.armed || s.open) return;
+    if (!s || !s.armed || s.open || s.dismissed) return;
     s.entries = historyEntries(s.dir);
-    if (!s.entries.length) return;
+    const n = s.entries.length;
+    if (!n) return;
 
-    s.list.replaceChildren();
-    s.highlight = h("div", { class: "dia-swipe-highlight" });
-    s.list.appendChild(s.highlight);
+    const above = Math.min(ROWS_ABOVE, n - 1);
+    const below = n > 1 ? ROWS_BELOW : 0;
+    const cardH = (above + 1 + below) * ROW_H + PAD * 2;
+    const slotY = PAD + above * ROW_H;
+
+    s.track = h("div", { class: "dia-swipe-track" });
     s.rows = s.entries.map((entry, i) => {
       const icon = h("img", { class: "dia-swipe-favicon", src: "page-icon:" + entry.url, alt: "" });
       icon.addEventListener("error", () => icon.setAttribute("broken", "true"));
@@ -256,74 +346,121 @@
           h("div", { class: "dia-swipe-host" }, hostOf(entry.url))
         )
       );
-      row.addEventListener("mousemove", () => select(i));
-      row.addEventListener("click", () => go(i));
-      s.list.appendChild(row);
+      row.style.top = `${slotY - i * ROW_H}px`;
+      s.track.appendChild(row);
       return row;
     });
+    const highlight = h("div", { class: "dia-swipe-highlight" });
+    highlight.style.top = `${slotY}px`;
+    s.list.replaceChildren(highlight, s.track);
 
-    // Size the card and keep it on screen; it grows down from the bubble.
-    const listH = Math.min(s.rows.length * ROW_H + LIST_PAD * 2, MAX_LIST_H, s.height - 32);
-    const bubbleTop = s.height / 2 - BUBBLE / 2;
-    const top = Math.max(16, Math.min(bubbleTop, s.height - 16 - listH));
-    s.bubble.style.setProperty("--list-h", `${listH}px`);
+    // Line the highlight up with where the bubble was, kept on screen.
+    const top = Math.max(16, Math.min(s.height / 2 - (slotY + ROW_H / 2), s.height - 16 - cardH));
+    s.bubble.style.setProperty("--list-h", `${cardH}px`);
     s.bubble.style.top = `${top}px`;
 
     setProgress(1);
     s.open = true;
+    s.anchor = s.mag;
+    s.extra = 0;
+    s.display = 0;
+    s.sel = 0;
+    s.rows[0].setAttribute("selected", "true");
     s.root.setAttribute("holding", "true");
+    overrideSwipePrefs();
     buzz(HAPTIC_STRONG);
-    select(0);
 
-    // Take keyboard focus for the arrow keys. Anything that moves focus away
-    // (clicking the page, another tab, another app) closes the list.
-    s.bubble.addEventListener("keydown", onKey);
-    s.bubble.addEventListener("blur", () => close());
-    s.bubble.focus({ preventScroll: true });
+    s.lastFrame = performance.now();
+    s.raf = requestAnimationFrame(frame);
   }
 
-  function select(i) {
-    if (i === s.sel || !s.rows[i]) return;
-    if (s.rows[s.sel]) s.rows[s.sel].removeAttribute("selected");
-    s.sel = i;
-    s.rows[i].setAttribute("selected", "true");
-    // The highlight glides between rows instead of jumping.
-    s.highlight.style.transform = `translateY(${LIST_PAD + i * ROW_H}px)`;
-    scrollToRow(i);
+  const rubber = d => RUBBER * (1 - 1 / (1 + d / RUBBER));
+
+  // Soft detents: near a row the list moves only slightly, between rows it
+  // moves faster, so it settles onto rows without ever jumping.
+  function magnet(x) {
+    const r = Math.round(x);
+    const f = x - r; // -0.5 … 0.5
+    return r + (1 - MAGNET) * f + MAGNET * 4 * f * f * f;
   }
 
-  function scrollToRow(i) {
-    const list = s.list;
-    const rowTop = LIST_PAD + i * ROW_H;
-    const view = list.clientHeight;
-    if (rowTop < list.scrollTop) list.scrollTop = rowTop - LIST_PAD;
-    else if (rowTop + ROW_H > list.scrollTop + view) list.scrollTop = rowTop + ROW_H + LIST_PAD - view;
+  function frame(now) {
+    const g = s;
+    if (!g || !g.open) return;
+    const dt = Math.min(0.05, (now - g.lastFrame) / 1000);
+    g.lastFrame = now;
+    const last = g.rows.length - 1;
+
+    let raw = (g.mag - g.anchor) / ROW_STEP + g.extra;
+
+    // Resting at the far end keeps scrolling through long histories.
+    if (g.mag >= EDGE_AT && raw < last) {
+      g.edgeHeld += dt;
+      const ramp = Math.min(1, g.edgeHeld / EDGE_RAMP_S);
+      g.extra += (EDGE_RATE_MIN + ramp * (EDGE_RATE_MAX - EDGE_RATE_MIN)) * dt;
+    } else {
+      g.edgeHeld = 0;
+    }
+    // Don't bank scroll past the oldest entry; reversing should respond at once.
+    if (g.extra > 0) {
+      raw = (g.mag - g.anchor) / ROW_STEP + g.extra;
+      if (raw > last) g.extra = Math.max(0, g.extra - (raw - last));
+    }
+    raw = (g.mag - g.anchor) / ROW_STEP + g.extra;
+
+    if (raw < -DISMISS_ROWS) {
+      dismiss();
+      return;
+    }
+
+    // Stretch past either end, fade a little while pulling toward dismiss.
+    let target;
+    if (raw < 0) target = -rubber(-raw);
+    else if (raw > last) target = last + rubber(raw - last);
+    else target = magnet(raw);
+    g.root.style.setProperty("--pull", raw < 0 ? String(Math.min(1, -raw / DISMISS_ROWS)) : "0");
+
+    g.display += (target - g.display) * (1 - Math.exp((-dt * 1000) / SMOOTH_MS));
+    g.track.style.transform = `translateY(${(g.display * ROW_H).toFixed(2)}px)`;
+
+    const sel = Math.max(0, Math.min(last, Math.round(raw)));
+    if (sel !== g.sel) {
+      g.rows[g.sel]?.removeAttribute("selected");
+      g.rows[sel].setAttribute("selected", "true");
+      g.sel = sel;
+      buzz(HAPTIC_TICK);
+    }
+
+    g.raf = requestAnimationFrame(frame);
   }
 
-  function onKey(e) {
-    if (!s || !s.open) return;
-    const last = s.rows.length - 1;
-    const keys = {
-      ArrowDown: () => select(Math.min(last, s.sel + 1)),
-      ArrowUp: () => select(Math.max(0, s.sel - 1)),
-      Home: () => select(0),
-      End: () => select(last),
-      PageDown: () => select(Math.min(last, s.sel + 5)),
-      PageUp: () => select(Math.max(0, s.sel - 5)),
-      Enter: () => go(s.sel),
-      Escape: () => close(),
-    };
-    e.preventDefault();
-    e.stopPropagation();
-    // Any other key counts as interacting with the page: just close.
-    (keys[e.key] || close)();
+  function stopScrub(g) {
+    cancelAnimationFrame(g.raf);
+    g.raf = 0;
+    g.open = false;
+    restoreSwipePrefs();
   }
 
-  function go(i) {
-    const entry = s?.entries[i];
-    if (!entry) return;
-    gBrowser.selectedBrowser.gotoIndex(entry.index);
-    commit();
+  // Pulled past the newest entry: put the list away, keep the page.
+  function dismiss() {
+    const g = s;
+    if (!g || g.dismissed) return;
+    stopScrub(g);
+    g.dismissed = true;
+    g.root.setAttribute("dismissed", "true");
+    buzz(HAPTIC_STRONG);
+  }
+
+  // Fingers lifted above the threshold: go to the highlighted page.
+  function go() {
+    const g = s;
+    const entry = g?.entries[g.sel];
+    stopScrub(g);
+    g.dismissed = true; // nothing else should happen in this gesture
+    if (entry) {
+      gBrowser.selectedBrowser.gotoIndex(entry.index);
+      commit();
+    }
     close(120);
   }
 
@@ -333,13 +470,12 @@
     if (!g) return;
     s = null;
     clearTimeout(g.holdTimer);
+    if (g.open) stopScrub(g);
     if (!g.root) return;
     setTimeout(() => {
       g.root.setAttribute("leaving", "true");
       setTimeout(() => g.root.remove(), 260);
     }, delay);
-    // Hand focus back to the page if the list still had it.
-    if (g.open && document.activeElement === g.bubble) gBrowser.selectedBrowser.focus();
   }
 
   function commit() {
@@ -355,8 +491,13 @@
 
   function update(e) {
     if (!s) s = fresh();
-    if (gestureOutside) return;
-    if (s.open) return; // the list is up; the swipe no longer matters
+    if (gestureOutside || s.dismissed) return;
+
+    if (s.open) {
+      // Measure along the original direction; the frame loop does the rest.
+      s.mag = Math.max(0, e.delta * s.sign);
+      return;
+    }
 
     const mag = Math.abs(e.delta);
     s.mag = mag;
@@ -376,6 +517,7 @@
       setProgress(0);
       return;
     }
+    s.sign = Math.sign(e.delta);
 
     setProgress(Math.min(mag / ARM_AT, 1));
 
@@ -398,21 +540,20 @@
 
   function end() {
     if (!s) return;
-    if (s.open) {
-      // Fingers lifted with the list up: keep it open for clicks/keys.
-      suppressUntil = performance.now() + 800;
-      return;
-    }
+    // Lifted below the threshold with the list up: it sprang back, so dismiss.
+    if (s.open) dismiss();
     // Leave a moment for a late MozSwipeGesture to mark the swipe committed.
-    close(s.committed ? 120 : 60);
+    close(s.committed ? 120 : s.dismissed ? 200 : 60);
   }
 
+  // Firefox's "swipe succeeded" event, sent the moment fingers lift above the
+  // threshold. With the list up, we navigate instead of Firefox.
   function onSwipeCommitted(e) {
     if (gestureOutside) return; // Firefox's own Back is blocked separately
-    if ((s && s.open) || performance.now() < suppressUntil) {
-      // The list is open: don't let Firefox go back on lift-off.
+    if (s && (s.open || s.dismissed)) {
       e.preventDefault();
       e.stopPropagation();
+      if (s.open) go();
       return;
     }
     commit();
@@ -450,6 +591,9 @@
       case "resize":
         if (s?.open) close();
         break;
+      case "SSTabRestored":
+        onTabRestored(e);
+        break;
     }
   }
 
@@ -462,11 +606,12 @@
   ];
 
   // Stop Firefox's own swipe-to-go-back for swipes that started outside the
-  // page. Patching this one method, rather than swallowing the swipe events,
-  // leaves those events intact for Zen's sidebar gestures.
+  // page, or while the list is handling the gesture. Patching this one
+  // method, rather than swallowing the swipe events, leaves those events
+  // intact for Zen's sidebar gestures.
   let origProcessSwipe = null; // captured in init(), once the browser is ready
   function patchedProcessSwipe(aEvent, aDir) {
-    if (gestureOutside) return;
+    if (gestureOutside || s?.open || s?.dismissed) return;
     return origProcessSwipe.call(this, aEvent, aDir);
   }
 
@@ -475,16 +620,22 @@
     for (const type of EVENTS) window.addEventListener(type, handleEvent, true);
     window.addEventListener("resize", handleEvent);
     gBrowser.tabContainer.addEventListener("TabSelect", handleEvent);
+    gBrowser.tabContainer.addEventListener("SSTabRestored", handleEvent);
     origProcessSwipe = gGestureSupport.processSwipeEvent;
     gGestureSupport.processSwipeEvent = patchedProcessSwipe;
+    // In case Zen quit mid-gesture last time.
+    window.addEventListener("unload", restoreSwipePrefs);
     window.DiaSwipe = {
       buzz,
       uninit() {
         for (const type of EVENTS) window.removeEventListener(type, handleEvent, true);
         window.removeEventListener("resize", handleEvent);
+        window.removeEventListener("unload", restoreSwipePrefs);
         gBrowser.tabContainer.removeEventListener("TabSelect", handleEvent);
+        gBrowser.tabContainer.removeEventListener("SSTabRestored", handleEvent);
         gGestureSupport.processSwipeEvent = origProcessSwipe;
         close();
+        restoreSwipePrefs();
         delete window.DiaSwipe;
       },
     };

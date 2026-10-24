@@ -8,11 +8,33 @@
 /* Fixed box laid over the visible page; position/size are set by the script.
    Clipping makes the bubble slide in from the page edge. */
 .dia-swipe {
+  /* Light appearance */
+  --ds-surface: #fff;
+  --ds-text: #1c1c1e;
+  --ds-muted: #8e8e93;
+  --ds-ring: rgba(0, 0, 0, 0.08);
+  --ds-shadow: rgba(0, 0, 0, 0.18);
+  --ds-shadow-strong: rgba(0, 0, 0, 0.22);
+  --ds-selected: rgba(0, 0, 0, 0.07);
+
   position: fixed;
   z-index: 2147483647;
   pointer-events: none;
   overflow: hidden;
   transition: opacity 0.22s ease;
+}
+
+/* Dark appearance: follows Zen's theme, which follows macOS by default. */
+@media (prefers-color-scheme: dark) {
+  .dia-swipe {
+    --ds-surface: #2c2c2e;
+    --ds-text: #f5f5f7;
+    --ds-muted: #98989d;
+    --ds-ring: rgba(255, 255, 255, 0.12);
+    --ds-shadow: rgba(0, 0, 0, 0.45);
+    --ds-shadow-strong: rgba(0, 0, 0, 0.55);
+    --ds-selected: rgba(255, 255, 255, 0.1);
+  }
 }
 
 .dia-swipe[leaving] {
@@ -28,11 +50,11 @@
   height: 44px;
   border-radius: 22px;
   overflow: hidden;
-  background: #fff;
-  color: #1c1c1e;
+  background: var(--ds-surface);
+  color: var(--ds-text);
   box-shadow:
-    0 0 0 0.5px rgba(0, 0, 0, 0.08),
-    0 6px 18px rgba(0, 0, 0, 0.18);
+    0 0 0 0.5px var(--ds-ring),
+    0 6px 18px var(--ds-shadow);
   transform: translateX(-60px) scale(0.55);
   opacity: 0;
   will-change: transform, width, height;
@@ -41,7 +63,8 @@
     height 0.34s cubic-bezier(0.32, 1.25, 0.5, 1),
     border-radius 0.3s ease,
     top 0.3s ease,
-    box-shadow 0.3s ease;
+    box-shadow 0.3s ease,
+    background-color 0.2s ease;
 }
 
 .dia-swipe[side="right"] .dia-swipe-bubble {
@@ -54,8 +77,8 @@
   height: var(--list-h, 200px);
   border-radius: 16px;
   box-shadow:
-    0 0 0 0.5px rgba(0, 0, 0, 0.08),
-    0 14px 36px rgba(0, 0, 0, 0.22);
+    0 0 0 0.5px var(--ds-ring),
+    0 14px 36px var(--ds-shadow-strong);
 }
 
 /* ---- Arrow ---- */
@@ -63,7 +86,7 @@
   position: absolute;
   top: 11px;
   left: 11px;
-  color: #8e8e93;
+  color: var(--ds-muted);
   transition: color 0.12s ease, opacity 0.14s ease, scale 0.2s ease;
 }
 
@@ -77,7 +100,7 @@
 }
 
 .dia-swipe[armed] .dia-swipe-arrow {
-  color: #1c1c1e;
+  color: var(--ds-text);
   animation: dia-swipe-pop 0.24s cubic-bezier(0.3, 1.6, 0.5, 1);
 }
 
@@ -111,7 +134,7 @@
   transition: opacity 0.18s ease;
   font: menu;
   font-size: 13px;
-  color: #1c1c1e;
+  color: var(--ds-text);
 }
 
 .dia-swipe[side="right"] .dia-swipe-list {
@@ -140,7 +163,7 @@
 }
 
 .dia-swipe-row[selected] {
-  background: rgba(0, 0, 0, 0.07);
+  background: var(--ds-selected);
 }
 
 .dia-swipe-favicon {
@@ -175,6 +198,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 11px;
-  color: #8e8e93;
+  color: var(--ds-muted);
   margin-top: 1px;
 }

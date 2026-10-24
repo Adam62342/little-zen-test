@@ -12,6 +12,87 @@
   const ROW_STEP = 40;     // vertical scroll px per row while list is open
   const MAX_ROWS = 12;
 
+
+  const LOG = (...a) => console.log("[swipe-back]", ...a);
+  LOG("loaded; platform =", Services.appinfo.OS);
+
+  // Inline stylesheet (no separate CSS install needed)
+  const style = document.createElementNS("http://www.w3.org/1999/xhtml", "style");
+  style.id = "zsb-style";
+  style.textContent = `/* Swipe Back — styles */
+.zsb-root {
+  --zsb-top: 50vh;
+  --zsb-left: 0px;
+  --zsb-x: -48px;
+  --zsb-surface: #fff;
+  --zsb-ink: #1c1c1e;
+  --zsb-muted: #6e6e73;
+  --zsb-select: #ececf0;
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  pointer-events: none;
+  visibility: hidden;
+}
+@media (prefers-color-scheme: dark) {
+  .zsb-root { --zsb-select: #e4e4ea; }
+}
+.zsb-root[active] { visibility: visible; }
+
+.zsb-bubble {
+  position: absolute;
+  top: var(--zsb-top);
+  left: calc(var(--zsb-left) + var(--zsb-x));
+  width: 40px;
+  height: 40px;
+  margin-top: -20px;
+  border-radius: 50%;
+  background: #fff;
+  color: #1c1c1e;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 2px 10px rgba(0,0,0,.22), 0 0 0 .5px rgba(0,0,0,.08);
+  transition: transform 140ms cubic-bezier(.3,1.6,.5,1);
+}
+.zsb-bubble svg { width: 18px; height: 18px; }
+.zsb-root[armed] .zsb-bubble { transform: scale(1.14); }
+.zsb-root[listopen] .zsb-bubble { transform: scale(1.0); }
+
+.zsb-list {
+  position: absolute;
+  top: var(--zsb-top);
+  left: calc(var(--zsb-left) + 58px);
+  transform: translateY(-20px) scale(.96);
+  transform-origin: 0 20px;
+  opacity: 0;
+  min-width: 240px;
+  max-width: 340px;
+  padding: 6px;
+  border-radius: 14px;
+  background: var(--zsb-surface);
+  box-shadow: 0 8px 30px rgba(0,0,0,.28), 0 0 0 .5px rgba(0,0,0,.08);
+  transition: opacity 120ms ease, transform 160ms cubic-bezier(.2,.9,.3,1.2);
+}
+.zsb-root[listopen] .zsb-list { opacity: 1; transform: translateY(-20px) scale(1); }
+
+.zsb-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  color: var(--zsb-ink);
+}
+.zsb-row[selected] { background: var(--zsb-select); }
+.zsb-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.zsb-host { font-size: 11px; color: var(--zsb-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+@media (prefers-reduced-motion: reduce) {
+  .zsb-bubble, .zsb-list { transition: none; }
+}
+`;
+  document.documentElement.appendChild(style);
+
   const HTML = "http://www.w3.org/1999/xhtml";
   const SVG = "http://www.w3.org/2000/svg";
   const h = (tag, cls, parent) => {
@@ -120,12 +201,14 @@
 
   // ---- gesture events (macOS, and Windows precision touchpads) ----
   window.addEventListener("MozSwipeGestureMayStart", (e) => {
+    LOG("MayStart dir=", e.direction, "canGoBack=", canGoBack());
     if (e.direction === e.DIRECTION_LEFT && canGoBack()) {
       e.allowedDirections |= e.DIRECTION_LEFT;
     }
   }, true);
 
   window.addEventListener("MozSwipeGestureStart", (e) => {
+    LOG("Start dir=", e.direction);
     if (e.direction !== e.DIRECTION_LEFT || !canGoBack()) return;
     reset();
     place();

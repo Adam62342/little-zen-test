@@ -152,18 +152,33 @@
 }
 
 .dia-swipe-row {
+  position: relative;
+  z-index: 1;
   height: 46px; /* keep in sync with ROW_H in the script */
   box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 11px;
   padding: 0 11px;
-  border-radius: 11px;
-  transition: background-color 0.08s ease;
 }
 
-.dia-swipe-row[selected] {
+/* One highlight that glides between rows; positioned by the script. */
+.dia-swipe-highlight {
+  position: absolute;
+  top: 0;
+  left: 7px;
+  right: 7px;
+  height: 46px;
+  border-radius: 11px;
   background: var(--ds-selected);
+  transform: translateY(7px);
+  transition:
+    transform 0.16s cubic-bezier(0.25, 1.2, 0.4, 1),
+    opacity 0.12s ease;
+}
+
+.dia-swipe[cancel] .dia-swipe-highlight {
+  opacity: 0;
 }
 
 .dia-swipe-favicon {

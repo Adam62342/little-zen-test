@@ -16,19 +16,24 @@
   const STILL_EPS = 0.02; // movement smaller than this counts as "holding"
   const MAX_ROWS = 50;
 
-  // Scrubbing: the highlight stays put and the list slides under it.
-  const ROW_STEP = 0.04; // swipe distance per row (~22px of finger travel)
+  // Scrolling the list: the highlight stays put and the list slides under it.
+  // Firefox's swipe tracker only reports sideways movement, so the list is
+  // scrolled with ordinary two-finger scrolling once you lift your fingers.
+  const WHEEL_ROW_PX = 38; // vertical scroll distance per row
   const MAGNET = 0.85; // 0 = no detents, 1 = strong pull toward each row while moving
   const SNAP_SPEED = 6; // rows/sec; below this the list snaps fully onto the nearest row
-  const SPEED_SMOOTH_MS = 70; // how quickly the finger-speed estimate reacts
+  const SPEED_SMOOTH_MS = 70; // how quickly the scroll-speed estimate reacts
   const SMOOTH_MS = 55; // how quickly the list catches up with your fingers
   const SNAP_MS = 90; // how quickly it settles onto a row once you slow down
   const RUBBER = 0.85; // how far (in rows) the list stretches past either end
-  const DISMISS_ROWS = 1.4; // pull this far past the newest entry to dismiss
-  const EDGE_AT = 0.97; // fingers at the far end of the swipe: keep scrolling
-  const EDGE_RATE_MIN = 4; // rows/sec when you first reach the end…
-  const EDGE_RATE_MAX = 14; // …ramping up to this
-  const EDGE_RAMP_S = 1.2;
+  const OVERSCROLL = 1.5; // rows of scrolling banked past either end at most
+
+  // Sideways movement: a slight shift of the card, or dismissal.
+  const NUDGE_MAX = 16; // px the card can shift sideways
+  const DISMISS_AT = 0.15; // while holding: swipe back to here (below the arm point) to dismiss
+  const DISMISS_PX = 90; // after lifting: sideways scroll toward the edge to dismiss
+  const SETTLE_MS = 90; // no scrolling for this long: overscroll and shift spring back
+  const SPRING_MS = 120; // how quickly they spring back
 
   // Card layout
   const BUBBLE = 50; // keep in sync with .dia-swipe-bubble size in CSS
@@ -37,12 +42,12 @@
   const ROWS_ABOVE = 1; // newer entries visible above the highlight
   const ROWS_BELOW = 3; // older entries visible below it
 
-  // While the list is open, make Firefox's swipe tracker report the real
-  // finger position. Normally it pins the value just under the threshold
-  // whenever your fingers move back, and lets speed decide the outcome, which
-  // makes scrubbing jumpy. With these, lifting your fingers above the
-  // threshold always "succeeds" (we pick the entry), and below it always
-  // springs back (we dismiss). Restored as soon as the list closes.
+  // While the list is open and your fingers are still down, make Firefox's
+  // swipe tracker report the real finger position. Normally it pins the value
+  // just under the threshold whenever your fingers move back, and lets speed
+  // decide the outcome. With these, lifting your fingers above the threshold
+  // always "succeeds" (the list stays up), and below it always springs back
+  // (we dismiss). Restored as soon as the swipe ends.
   const SWIPE_PREFS = {
     "widget.swipe.velocity-twitch-tolerance": "1000000",
     "widget.swipe.success-velocity-contribution": "0",
@@ -249,17 +254,22 @@
       armed: false,
       stillAt: 0,
       holdTimer: 0,
-      // Scrubbing
+      width: 0,
+      // History list
       open: false, // history list is showing
+      parked: false, // fingers lifted; the list stays up and takes scrolling
       dismissed: false, // list was swiped away; ignore the rest of this gesture
       entries: [],
       rows: [],
       anchor: 0, // swipe position when the list opened
-      extra: 0, // rows added by resting at the far end
-      edgeHeld: 0,
+      pos: 0, // scroll position, in rows
       display: 0, // where the list is drawn, in rows (eased)
       lastRaw: 0,
-      speed: 0, // smoothed finger speed, rows/sec
+      speed: 0, // smoothed scroll speed, rows/sec
+      hx: 0, // after lifting: sideways scroll toward the edge, px
+      nx: 0, // sideways shift of the card as drawn, px (eased)
+      wheelYAt: 0,
+      wheelXAt: 0,
       sel: 0,
       raf: 0,
       lastFrame: 0,
@@ -285,7 +295,8 @@
     const rect = gBrowser.selectedBrowser.getBoundingClientRect();
     if (!rect.width || !rect.height) return false;
     s.list = h("div", { class: "dia-swipe-list" });
-    s.bubble = h("div", { class: "dia-swipe-bubble" }, arrowIcon(), s.list);
+    // Focusable so it can take arrow keys / Return / Escape once parked.
+    s.bubble = h("div", { class: "dia-swipe-bubble", tabindex: "-1" }, arrowIcon(), s.list);
     s.root = h("div", { class: "dia-swipe" }, s.bubble);
     Object.assign(s.root.style, {
       left: `${rect.left}px`,
@@ -294,6 +305,7 @@
       height: `${rect.height}px`,
     });
     s.height = rect.height;
+    s.width = rect.width;
     s.bubble.style.top = `${rect.height / 2 - BUBBLE / 2}px`;
     (document.body || document.documentElement).appendChild(s.root);
     return true;
@@ -322,9 +334,8 @@
     s.holdTimer = setTimeout(openList, HOLD_DELAY_MS);
   }
 
-  // Older pages sit below the highlight and newer ones above. Swiping further
-  // pulls older pages up into the highlight; swiping back brings newer ones
-  // down, and pulling past the newest dismisses the list.
+  // Older pages sit below the highlight and newer ones above. Scrolling up
+  // (natural scrolling) pulls older pages into the highlight.
   function openList() {
     if (!s || !s.armed || s.open || s.dismissed) return;
     s.entries = historyEntries(s.dir);
@@ -367,7 +378,7 @@
     setProgress(1);
     s.open = true;
     s.anchor = s.mag;
-    s.extra = 0;
+    s.pos = 0;
     s.display = 0;
     s.sel = 0;
     s.rows[0].setAttribute("selected", "true");
@@ -380,6 +391,11 @@
   }
 
   const rubber = d => RUBBER * (1 - 1 / (1 + d / RUBBER));
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const approach = (dt, ms) => 1 - Math.exp((-dt * 1000) / ms);
+
+  // Sideways shift: follows your fingers at first, then stiffens.
+  const nudge = d => Math.sign(d) * NUDGE_MAX * (1 - 1 / (1 + Math.abs(d) / (NUDGE_MAX / 0.35)));
 
   // Soft detents: near a row the list moves only slightly, between rows it
   // moves faster, so it settles onto rows without ever jumping.
@@ -396,50 +412,49 @@
     g.lastFrame = now;
     const last = g.rows.length - 1;
 
-    let raw = (g.mag - g.anchor) / ROW_STEP + g.extra;
-
-    // Resting at the far end keeps scrolling through long histories.
-    if (g.mag >= EDGE_AT && raw < last) {
-      g.edgeHeld += dt;
-      const ramp = Math.min(1, g.edgeHeld / EDGE_RAMP_S);
-      g.extra += (EDGE_RATE_MIN + ramp * (EDGE_RATE_MAX - EDGE_RATE_MIN)) * dt;
+    // Sideways: a slight shift of the card. Toward the edge also fades it,
+    // as a hint that going further dismisses.
+    let inward, pull;
+    if (g.parked) {
+      if (now - g.wheelXAt > SETTLE_MS) g.hx -= g.hx * approach(dt, SPRING_MS);
+      inward = -g.hx;
+      pull = g.hx / DISMISS_PX;
     } else {
-      g.edgeHeld = 0;
+      if (g.mag <= DISMISS_AT) {
+        dismiss();
+        return;
+      }
+      inward = (g.mag - g.anchor) * g.width;
+      pull = (g.anchor - g.mag) / Math.max(0.05, g.anchor - DISMISS_AT);
     }
-    // Don't bank scroll past the oldest entry; reversing should respond at once.
-    if (g.extra > 0) {
-      raw = (g.mag - g.anchor) / ROW_STEP + g.extra;
-      if (raw > last) g.extra = Math.max(0, g.extra - (raw - last));
-    }
-    raw = (g.mag - g.anchor) / ROW_STEP + g.extra;
+    g.nx += (nudge(inward) - g.nx) * approach(dt, SMOOTH_MS);
+    const away = g.side === "right" ? -1 : 1;
+    g.bubble.style.translate = `${(away * g.nx).toFixed(2)}px 0`;
+    g.root.style.setProperty("--pull", clamp(pull, 0, 1).toFixed(3));
 
-    if (raw < -DISMISS_ROWS) {
-      dismiss();
-      return;
+    // Vertical: once scrolling stops, overscroll springs back inside the list.
+    if (now - g.wheelYAt > SETTLE_MS) {
+      g.pos += (clamp(g.pos, 0, last) - g.pos) * approach(dt, SPRING_MS);
     }
+    const raw = g.pos;
 
-    // Stretch past either end, fade a little while pulling toward dismiss.
-    // Inside the list, the magnet pulls toward rows while you move, and once
-    // your fingers slow down it snaps fully onto the nearest one.
+    // Stretch past either end. Inside the list, the magnet pulls toward rows
+    // while you scroll, and once scrolling slows it snaps onto the nearest one.
     const speed = Math.abs(raw - g.lastRaw) / Math.max(dt, 0.001);
     g.lastRaw = raw;
-    g.speed += (speed - g.speed) * (1 - Math.exp((-dt * 1000) / SPEED_SMOOTH_MS));
-    const snap = Math.max(0, Math.min(1, 1 - g.speed / SNAP_SPEED));
+    g.speed += (speed - g.speed) * approach(dt, SPEED_SMOOTH_MS);
+    const snap = clamp(1 - g.speed / SNAP_SPEED, 0, 1);
 
     let target;
     if (raw < 0) target = -rubber(-raw);
     else if (raw > last) target = last + rubber(raw - last);
-    else {
-      const nearest = Math.round(raw);
-      target = magnet(raw) + (nearest - magnet(raw)) * snap;
-    }
-    g.root.style.setProperty("--pull", raw < 0 ? String(Math.min(1, -raw / DISMISS_ROWS)) : "0");
+    else target = magnet(raw) + (Math.round(raw) - magnet(raw)) * snap;
 
     const ease = SMOOTH_MS + (SNAP_MS - SMOOTH_MS) * snap;
-    g.display += (target - g.display) * (1 - Math.exp((-dt * 1000) / ease));
+    g.display += (target - g.display) * approach(dt, ease);
     g.track.style.transform = `translateY(${(-g.display * ROW_H).toFixed(2)}px)`;
 
-    const sel = Math.max(0, Math.min(last, Math.round(raw)));
+    const sel = clamp(Math.round(raw), 0, last);
     if (sel !== g.sel) {
       g.rows[g.sel]?.removeAttribute("selected");
       g.rows[sel].setAttribute("selected", "true");
@@ -450,27 +465,116 @@
     g.raf = requestAnimationFrame(frame);
   }
 
+  // ---- Parked: fingers lifted, the list stays up ----------------------------
+  // The swipe tracker never reports vertical movement, so the list waits for
+  // your next two-finger scroll. It covers the page so that scroll (and any
+  // click) comes to the list rather than the website.
+  function park() {
+    const g = s;
+    if (!g?.open || g.parked) return;
+    g.parked = true;
+    g.hx = 0;
+    restoreSwipePrefs();
+    g.root.setAttribute("parked", "true");
+    g.root.addEventListener("wheel", onWheel, { passive: false });
+    g.root.addEventListener("click", onClick);
+    g.root.addEventListener("keydown", onKey);
+    g.bubble.focus({ preventScroll: true });
+  }
+
+  function onWheel(e) {
+    const g = s;
+    if (!g?.parked || e.currentTarget !== g.root) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const unit =
+      e.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? WHEEL_ROW_PX / 3 // a mouse-wheel notch is 3 lines: one row
+        : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? WHEEL_ROW_PX * 3
+          : 1;
+    const now = performance.now();
+    if (e.deltaY) {
+      const last = g.rows.length - 1;
+      g.pos = clamp(g.pos + (e.deltaY * unit) / WHEEL_ROW_PX, -OVERSCROLL, last + OVERSCROLL);
+      g.wheelYAt = now;
+    }
+    if (e.deltaX) {
+      // With natural scrolling, fingers moving left give a positive deltaX.
+      // Toward the edge the bubble came from dismisses; the other way only
+      // shifts the card a little.
+      const towardEdge = g.side === "right" ? -e.deltaX : e.deltaX;
+      g.hx = Math.max(-DISMISS_PX, g.hx + towardEdge * unit);
+      g.wheelXAt = now;
+      if (g.hx >= DISMISS_PX) dismiss();
+    }
+  }
+
+  function onClick(e) {
+    const g = s;
+    if (!g?.parked) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const row = e.target.closest?.(".dia-swipe-row");
+    if (row) go(g.rows.indexOf(row));
+    else if (g.bubble.contains(e.target)) go();
+    else dismiss(); // clicked the page around the list
+  }
+
+  function onKey(e) {
+    const g = s;
+    if (!g?.parked) return;
+    const last = g.rows.length - 1;
+    switch (e.key) {
+      case "ArrowDown":
+      case "ArrowUp":
+        g.pos = clamp(Math.round(g.pos) + (e.key === "ArrowDown" ? 1 : -1), 0, last);
+        break;
+      case "Enter":
+      case " ":
+        go();
+        break;
+      case "Escape":
+        dismiss();
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
   function stopScrub(g) {
     cancelAnimationFrame(g.raf);
     g.raf = 0;
     g.open = false;
+    if (g.parked) {
+      g.parked = false;
+      g.root.removeAttribute("parked");
+      if (g.root.contains(document.activeElement)) gBrowser.selectedBrowser.focus();
+    }
     restoreSwipePrefs();
   }
 
-  // Pulled past the newest entry: put the list away, keep the page.
+  // Swiped or scrolled away toward the edge: put the list away, keep the page.
   function dismiss() {
     const g = s;
     if (!g || g.dismissed) return;
+    const wasParked = g.parked;
     stopScrub(g);
     g.dismissed = true;
+    g.bubble.style.translate = ""; // let the dismiss animation take over
     g.root.setAttribute("dismissed", "true");
     buzz(HAPTIC_STRONG);
+    // While still holding, the end of the swipe closes it.
+    if (wasParked) close(200);
   }
 
-  // Fingers lifted above the threshold: go to the highlighted page.
-  function go() {
+  // Go to the highlighted page, or the one at `index`.
+  function go(index) {
     const g = s;
-    const entry = g?.entries[g.sel];
+    if (!g) return;
+    const entry = g.entries[index ?? g.sel];
     stopScrub(g);
     g.dismissed = true; // nothing else should happen in this gesture
     if (entry) {
@@ -507,10 +611,11 @@
 
   function update(e) {
     if (!s) s = fresh();
-    if (gestureOutside || s.dismissed) return;
+    if (gestureOutside || s.dismissed || s.parked) return;
 
     if (s.open) {
-      // Measure along the original direction; the frame loop does the rest.
+      // Measure along the original direction; only used for the sideways
+      // shift and dismissal. The frame loop does the rest.
       s.mag = Math.max(0, e.delta * s.sign);
       return;
     }
@@ -555,7 +660,7 @@
   }
 
   function end() {
-    if (!s) return;
+    if (!s || s.parked) return; // a parked list outlives the swipe
     // Lifted below the threshold with the list up: it sprang back, so dismiss.
     if (s.open) dismiss();
     // Leave a moment for a late MozSwipeGesture to mark the swipe committed.
@@ -563,13 +668,13 @@
   }
 
   // Firefox's "swipe succeeded" event, sent the moment fingers lift above the
-  // threshold. With the list up, we navigate instead of Firefox.
+  // threshold. With the list up, it stays up for scrolling instead.
   function onSwipeCommitted(e) {
     if (gestureOutside) return; // Firefox's own Back is blocked separately
     if (s && (s.open || s.dismissed)) {
       e.preventDefault();
       e.stopPropagation();
-      if (s.open) go();
+      if (s.open) park();
       return;
     }
     commit();
@@ -586,6 +691,12 @@
   }
 
   function dispatch(e) {
+    // Over a parked list, don't let a new swipe start (nobody accepts it), so
+    // sideways scrolling arrives as ordinary scroll events for the list.
+    if (e.type.startsWith("MozSwipeGesture") && s?.parked && s.root.contains(e.target)) {
+      e.stopPropagation();
+      return;
+    }
     switch (e.type) {
       case "MozSwipeGestureMayStart":
         gestureOutside = !overContent(e);

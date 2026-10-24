@@ -18,8 +18,11 @@
 
   // Scrubbing: the highlight stays put and the list slides under it.
   const ROW_STEP = 0.04; // swipe distance per row (~22px of finger travel)
-  const MAGNET = 0.6; // 0 = no detents, 1 = strong pull toward each row
+  const MAGNET = 0.85; // 0 = no detents, 1 = strong pull toward each row while moving
+  const SNAP_SPEED = 6; // rows/sec; below this the list snaps fully onto the nearest row
+  const SPEED_SMOOTH_MS = 70; // how quickly the finger-speed estimate reacts
   const SMOOTH_MS = 55; // how quickly the list catches up with your fingers
+  const SNAP_MS = 90; // how quickly it settles onto a row once you slow down
   const RUBBER = 0.85; // how far (in rows) the list stretches past either end
   const DISMISS_ROWS = 1.4; // pull this far past the newest entry to dismiss
   const EDGE_AT = 0.97; // fingers at the far end of the swipe: keep scrolling
@@ -31,8 +34,8 @@
   const BUBBLE = 50; // keep in sync with .dia-swipe-bubble size in CSS
   const ROW_H = 46; // keep in sync with .dia-swipe-row height in CSS
   const PAD = 7;
-  const ROWS_ABOVE = 3; // older entries visible above the highlight
-  const ROWS_BELOW = 1; // newer entries visible below it
+  const ROWS_ABOVE = 1; // newer entries visible above the highlight
+  const ROWS_BELOW = 3; // older entries visible below it
 
   // While the list is open, make Firefox's swipe tracker report the real
   // finger position. Normally it pins the value just under the threshold
@@ -255,6 +258,8 @@
       extra: 0, // rows added by resting at the far end
       edgeHeld: 0,
       display: 0, // where the list is drawn, in rows (eased)
+      lastRaw: 0,
+      speed: 0, // smoothed finger speed, rows/sec
       sel: 0,
       raf: 0,
       lastFrame: 0,
@@ -317,17 +322,17 @@
     s.holdTimer = setTimeout(openList, HOLD_DELAY_MS);
   }
 
-  // Older pages sit above the highlight and newer ones below. Swiping further
-  // pulls older pages down into the highlight; swiping back brings newer ones
-  // up, and pulling past the newest dismisses the list.
+  // Older pages sit below the highlight and newer ones above. Swiping further
+  // pulls older pages up into the highlight; swiping back brings newer ones
+  // down, and pulling past the newest dismisses the list.
   function openList() {
     if (!s || !s.armed || s.open || s.dismissed) return;
     s.entries = historyEntries(s.dir);
     const n = s.entries.length;
     if (!n) return;
 
-    const above = Math.min(ROWS_ABOVE, n - 1);
-    const below = n > 1 ? ROWS_BELOW : 0;
+    const below = Math.min(ROWS_BELOW, n - 1);
+    const above = n > 1 ? ROWS_ABOVE : 0;
     const cardH = (above + 1 + below) * ROW_H + PAD * 2;
     const slotY = PAD + above * ROW_H;
 
@@ -346,7 +351,7 @@
           h("div", { class: "dia-swipe-host" }, hostOf(entry.url))
         )
       );
-      row.style.top = `${slotY - i * ROW_H}px`;
+      row.style.top = `${slotY + i * ROW_H}px`;
       s.track.appendChild(row);
       return row;
     });
@@ -414,14 +419,25 @@
     }
 
     // Stretch past either end, fade a little while pulling toward dismiss.
+    // Inside the list, the magnet pulls toward rows while you move, and once
+    // your fingers slow down it snaps fully onto the nearest one.
+    const speed = Math.abs(raw - g.lastRaw) / Math.max(dt, 0.001);
+    g.lastRaw = raw;
+    g.speed += (speed - g.speed) * (1 - Math.exp((-dt * 1000) / SPEED_SMOOTH_MS));
+    const snap = Math.max(0, Math.min(1, 1 - g.speed / SNAP_SPEED));
+
     let target;
     if (raw < 0) target = -rubber(-raw);
     else if (raw > last) target = last + rubber(raw - last);
-    else target = magnet(raw);
+    else {
+      const nearest = Math.round(raw);
+      target = magnet(raw) + (nearest - magnet(raw)) * snap;
+    }
     g.root.style.setProperty("--pull", raw < 0 ? String(Math.min(1, -raw / DISMISS_ROWS)) : "0");
 
-    g.display += (target - g.display) * (1 - Math.exp((-dt * 1000) / SMOOTH_MS));
-    g.track.style.transform = `translateY(${(g.display * ROW_H).toFixed(2)}px)`;
+    const ease = SMOOTH_MS + (SNAP_MS - SMOOTH_MS) * snap;
+    g.display += (target - g.display) * (1 - Math.exp((-dt * 1000) / ease));
+    g.track.style.transform = `translateY(${(-g.display * ROW_H).toFixed(2)}px)`;
 
     const sel = Math.max(0, Math.min(last, Math.round(raw)));
     if (sel !== g.sel) {

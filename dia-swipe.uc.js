@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           Dia Swipe
-// @description    Dia-style swipe back/forward bubble with hold-to-scrub history list
+// @description    Dia-style swipe back/forward bubble; hold to open a history list
 // @include        main
 // ==/UserScript==
 
@@ -14,32 +14,6 @@
   const ARM_AT = 0.25;
   const HOLD_DELAY_MS = 380; // how long you must sit still to open the list
   const STILL_EPS = 0.02; // movement smaller than this counts as "holding"
-
-  // Scrubbing works like a trackpad cursor: slow movement is precise, faster
-  // movement covers more rows. Speeds are in page-widths per second.
-  const ROW_STEP = 0.035; // swipe distance per row at slow speed (~19px)
-  const ACCEL_FROM = 0.15; // below this speed there's no acceleration
-  const ACCEL = 2.5; // extra gain per unit of speed above ACCEL_FROM
-  const ACCEL_MAX = 3; // gain tops out at 1 + ACCEL_MAX
-  const HYSTERESIS = 0.08; // extra fraction of a row to cross before switching
-  const CANCEL_STEPS = 2; // rows to scrub above the top entry to cancel
-
-  // Resting near either end of the swipe range keeps scrolling, faster the
-  // deeper you push.
-  const LOW_EDGE = 0.06; // near the screen edge: scroll down the list
-  const HIGH_EDGE = 0.92; // far end of the swipe: scroll up the list
-  const EDGE_DWELL_MS = 300; // long enough that the lift-off animation can't trigger it
-  const EDGE_RATE_MIN = 5; // rows/sec at the start of the edge zone
-  const EDGE_RATE_MAX = 16; // rows/sec at the very end
-
-  // Lift-off detection: faster than this is Firefox animating the swipe away
-  // after your fingers leave the trackpad. On detection the list freezes on
-  // the row from LIFT_LOOKBACK_MS earlier.
-  const RELEASE_SPEED = 1.4; // page-widths/sec, sustained over two updates
-  const LIFT_LOOKBACK_MS = 150;
-  const SPEED_WINDOW_MS = 50; // speed is averaged over this much time
-  const MIN_SPAN_MS = 16; // need at least this much history to judge speed
-  const UNFREEZE_EPS = 0.01; // moving back this far after a freeze = still touching
   const MAX_ROWS = 50;
   const BUBBLE = 50; // keep in sync with .dia-swipe-bubble size in CSS
   const ROW_H = 46; // keep in sync with .dia-swipe-row height in CSS
@@ -62,9 +36,8 @@
 
   // ---- Haptics ------------------------------------------------------------
   // macOS: call NSHapticFeedbackManager through js-ctypes, since Gecko doesn't
-  // expose trackpad haptics to chrome JS. Patterns: 0 generic, 1 alignment,
-  // 2 level change. Only fires on a Force Touch trackpad with fingers down.
-  const HAPTIC_TICK = 1;
+  // expose trackpad haptics to chrome JS. Pattern 2 = "level change".
+  // Only fires on a Force Touch trackpad with fingers down.
   const HAPTIC_STRONG = 2;
 
   // Built lazily on first use so a ctypes problem can't affect startup.
@@ -166,46 +139,31 @@
     }
   }
 
-  // ---- Gesture state ------------------------------------------------------
+  // ---- State ----------------------------------------------------------------
+  // `s` is the current swipe, and stays alive while its list is open.
   let s = null;
+  let suppressUntil = 0;
 
   function fresh() {
     return {
       root: null,
       bubble: null,
       list: null,
+      highlight: null,
       height: 0,
       dir: null, // "back" | "forward" | null
       side: null, // "left" | "right"
-      sign: 1, // sign of delta for the current direction
       mag: 0,
       armed: false,
-      holding: false,
-      released: false,
-      releaseDir: 1,
-      releaseExtreme: 0,
-      fastCount: 0,
-      recent: [],
+      open: false, // history list is showing
       stillAt: 0,
       holdTimer: 0,
-      edgeRaf: 0,
-      edgeDwell: 0,
-      edgeDir: 0,
-      edgeT: 0,
-      pos: 0, // continuous scrub position, in rows
-      slot: 0, // row the highlight sits on (may be negative = cancel zone)
-      lastMag: 0,
-      lastT: 0,
-      listH: 0,
-      highlight: null,
       entries: [],
       rows: [],
       sel: -1,
-      samples: [],
       committed: false,
     };
   }
-  let suppressUntil = 0;
 
   function directionFor(event, delta) {
     if (!delta) return null;
@@ -218,13 +176,14 @@
     return null;
   }
 
+  // ---- Bubble ---------------------------------------------------------------
   // The overlay is a fixed-position box laid exactly over the visible page,
   // so it doesn't depend on how Zen lays out the browser container.
   function mount() {
     const rect = gBrowser.selectedBrowser.getBoundingClientRect();
     if (!rect.width || !rect.height) return false;
     s.list = h("div", { class: "dia-swipe-list" });
-    s.bubble = h("div", { class: "dia-swipe-bubble" }, arrowIcon(), s.list);
+    s.bubble = h("div", { class: "dia-swipe-bubble", tabindex: "-1" }, arrowIcon(), s.list);
     s.root = h("div", { class: "dia-swipe" }, s.bubble);
     Object.assign(s.root.style, {
       left: `${rect.left}px`,
@@ -258,18 +217,18 @@
   function scheduleHold() {
     clearTimeout(s.holdTimer);
     if (!boolPref("hold_list", true)) return;
-    s.holdTimer = setTimeout(enterHold, HOLD_DELAY_MS);
+    s.holdTimer = setTimeout(openList, HOLD_DELAY_MS);
   }
 
-  function enterHold() {
-    if (!s || !s.armed || s.holding) return;
+  function openList() {
+    if (!s || !s.armed || s.open) return;
     s.entries = historyEntries(s.dir);
     if (!s.entries.length) return;
 
     s.list.replaceChildren();
     s.highlight = h("div", { class: "dia-swipe-highlight" });
     s.list.appendChild(s.highlight);
-    s.rows = s.entries.map(entry => {
+    s.rows = s.entries.map((entry, i) => {
       const icon = h("img", { class: "dia-swipe-favicon", src: "page-icon:" + entry.url, alt: "" });
       icon.addEventListener("error", () => icon.setAttribute("broken", "true"));
       const row = h(
@@ -283,219 +242,90 @@
           h("div", { class: "dia-swipe-host" }, hostOf(entry.url))
         )
       );
+      row.addEventListener("mousemove", () => select(i));
+      row.addEventListener("click", () => go(i));
       s.list.appendChild(row);
       return row;
     });
 
     // Size the card and keep it on screen; it grows down from the bubble.
-    const stackH = s.height;
-    const listH = Math.min(s.rows.length * ROW_H + LIST_PAD * 2, MAX_LIST_H, stackH - 32);
-    const bubbleTop = stackH / 2 - BUBBLE / 2;
-    const top = Math.max(16, Math.min(bubbleTop, stackH - 16 - listH));
-    s.listH = listH;
+    const listH = Math.min(s.rows.length * ROW_H + LIST_PAD * 2, MAX_LIST_H, s.height - 32);
+    const bubbleTop = s.height / 2 - BUBBLE / 2;
+    const top = Math.max(16, Math.min(bubbleTop, s.height - 16 - listH));
     s.bubble.style.setProperty("--list-h", `${listH}px`);
     s.bubble.style.top = `${top}px`;
 
     setProgress(1);
-    s.holding = true;
-    s.pos = 0;
-    s.slot = 0;
-    s.lastMag = s.mag;
-    s.lastT = performance.now();
+    s.open = true;
     s.root.setAttribute("holding", "true");
     buzz(HAPTIC_STRONG);
-    select(0, true);
-    pushSample();
+    select(0);
+
+    // Take keyboard focus for the arrow keys. Anything that moves focus away
+    // (clicking the page, another tab, another app) closes the list.
+    s.bubble.addEventListener("keydown", onKey);
+    s.bubble.addEventListener("blur", () => close());
+    s.bubble.focus({ preventScroll: true });
   }
 
-  function select(i, silent) {
-    if (i === s.sel) return;
+  function select(i) {
+    if (i === s.sel || !s.rows[i]) return;
     if (s.rows[s.sel]) s.rows[s.sel].removeAttribute("selected");
     s.sel = i;
-    s.root.toggleAttribute("cancel", i < 0);
-    if (s.rows[i]) {
-      s.rows[i].setAttribute("selected", "true");
-      // The highlight glides between rows instead of jumping.
-      s.highlight.style.transform = `translateY(${LIST_PAD + i * ROW_H}px)`;
-    }
-    if (!silent) buzz(HAPTIC_TICK);
+    s.rows[i].setAttribute("selected", "true");
+    // The highlight glides between rows instead of jumping.
+    s.highlight.style.transform = `translateY(${LIST_PAD + i * ROW_H}px)`;
+    scrollToRow(i);
   }
 
-  // Keep the scrub position comfortably inside the visible part of the list.
-  // Driven by the continuous position, so the list moves with your fingers.
-  // Uses known row geometry because the card is still growing at first.
-  function followScroll() {
+  function scrollToRow(i) {
     const list = s.list;
-    const view = s.listH;
-    const center = LIST_PAD + (Math.max(0, s.pos) + 0.5) * ROW_H;
-    const margin = Math.min(ROW_H * 1.5, view / 2 - ROW_H / 2);
-    const max = Math.max(0, LIST_PAD * 2 + s.rows.length * ROW_H - view);
-    let target = list.scrollTop;
-    if (center - margin < target) target = center - margin;
-    else if (center + margin > target + view) target = center + margin - view;
-    list.scrollTop = Math.max(0, Math.min(target, max));
+    const rowTop = LIST_PAD + i * ROW_H;
+    const view = list.clientHeight;
+    if (rowTop < list.scrollTop) list.scrollTop = rowTop - LIST_PAD;
+    else if (rowTop + ROW_H > list.scrollTop + view) list.scrollTop = rowTop + ROW_H + LIST_PAD - view;
   }
 
-  // Swiping back toward the screen edge moves down the list; swiping further
-  // out moves up. Scrubbing past the top entry cancels.
-  function movePos(rows) {
-    const lo = -CANCEL_STEPS;
-    const hi = s.rows.length - 1;
-    // Clamping the position itself means reversing responds immediately.
-    s.pos = Math.max(lo, Math.min(hi, s.pos + rows));
-    // Only change rows once clearly past the midpoint, so a finger resting on
-    // a boundary doesn't flicker between two rows.
-    if (Math.abs(s.pos - s.slot) > 0.5 + HYSTERESIS) {
-      s.slot = Math.max(lo, Math.min(hi, Math.round(s.pos)));
-    }
-    select(s.slot < 0 ? (s.slot <= lo ? -1 : 0) : s.slot);
-    followScroll();
-    pushSample();
+  function onKey(e) {
+    if (!s || !s.open) return;
+    const last = s.rows.length - 1;
+    const keys = {
+      ArrowDown: () => select(Math.min(last, s.sel + 1)),
+      ArrowUp: () => select(Math.max(0, s.sel - 1)),
+      Home: () => select(0),
+      End: () => select(last),
+      PageDown: () => select(Math.min(last, s.sel + 5)),
+      PageUp: () => select(Math.max(0, s.sel - 5)),
+      Enter: () => go(s.sel),
+      Escape: () => close(),
+    };
+    e.preventDefault();
+    e.stopPropagation();
+    // Any other key counts as interacting with the page: just close.
+    (keys[e.key] || close)();
   }
 
-  function onHoldMove(mag) {
-    const now = performance.now();
-    const dm = mag - s.lastMag;
-    const dt = Math.max(4, now - s.lastT) / 1000;
-    s.lastMag = mag;
-    s.lastT = now;
-    s.mag = mag;
-
-    // Speed over a short window, not between two updates: updates can arrive
-    // almost back-to-back, which makes a tiny move look extremely fast.
-    s.recent.push({ t: now, mag });
-    while (s.recent.length > 2 && now - s.recent[0].t > SPEED_WINDOW_MS) s.recent.shift();
-    const first = s.recent[0];
-    const span = now - first.t;
-    const windowSpeed = span >= MIN_SPAN_MS ? Math.abs(mag - first.mag) / (span / 1000) : 0;
-
-    if (s.released) {
-      // Firefox's lift-off animation only moves one way. Moving back against
-      // it means your fingers are still down, so unfreeze.
-      s.releaseExtreme =
-        s.releaseDir > 0 ? Math.max(s.releaseExtreme, mag) : Math.min(s.releaseExtreme, mag);
-      if ((s.releaseExtreme - mag) * s.releaseDir > UNFREEZE_EPS) {
-        s.released = false;
-        s.fastCount = 0;
-        s.recent = [{ t: now, mag }];
-      }
-      return;
-    }
-
-    // A sustained fast move means your fingers lifted and Firefox is
-    // animating the swipe away. Freeze on the row you were on before that.
-    s.fastCount = windowSpeed > RELEASE_SPEED ? s.fastCount + 1 : 0;
-    if (s.fastCount >= 2) {
-      release(now, Math.sign(mag - first.mag), mag);
-      return;
-    }
-
-    updateEdgeScroll();
-    const speed = Math.min(windowSpeed || Math.abs(dm) / dt, RELEASE_SPEED);
-    const gain = 1 + Math.min(ACCEL_MAX, Math.max(0, speed - ACCEL_FROM) * ACCEL);
-    movePos((-dm / ROW_STEP) * gain);
-  }
-
-  function release(now, dir, mag) {
-    s.released = true;
-    s.releaseDir = dir || 1;
-    s.releaseExtreme = mag;
-    stopEdgeScroll();
-    const sel = selectionBefore(now - LIFT_LOOKBACK_MS);
-    if (sel !== s.sel) select(sel, true);
-  }
-
-  // The selection as it was at time t: the lift-off animation starts slowly,
-  // so the last few updates before it's detected also need undoing.
-  function selectionBefore(t) {
-    let sel = s.samples.length ? s.samples[0].sel : s.sel;
-    for (const sample of s.samples) {
-      if (sample.t > t) break;
-      sel = sample.sel;
-    }
-    return sel;
-  }
-
-  // Continuous auto-scroll while resting at either end of the swipe range.
-  function updateEdgeScroll() {
-    const dirn = s.mag <= LOW_EDGE ? 1 : s.mag >= HIGH_EDGE ? -1 : 0;
-    if (dirn === s.edgeDir) return;
-    stopEdgeScroll();
-    s.edgeDir = dirn;
-    if (!dirn) return;
-    const g = s;
-    g.edgeDwell = setTimeout(() => {
-      g.edgeT = performance.now();
-      const tick = now => {
-        if (s !== g || !g.holding || g.released || !g.edgeDir) return;
-        const dt = Math.min(0.05, (now - g.edgeT) / 1000);
-        g.edgeT = now;
-        const depth =
-          g.edgeDir > 0
-            ? (LOW_EDGE - g.mag) / LOW_EDGE
-            : (g.mag - HIGH_EDGE) / (1 - HIGH_EDGE);
-        const rate = EDGE_RATE_MIN + Math.max(0, Math.min(1, depth)) * (EDGE_RATE_MAX - EDGE_RATE_MIN);
-        movePos(g.edgeDir * rate * dt);
-        g.edgeRaf = requestAnimationFrame(tick);
-      };
-      g.edgeRaf = requestAnimationFrame(tick);
-    }, EDGE_DWELL_MS);
-  }
-
-  function stopEdgeScroll() {
-    clearTimeout(s.edgeDwell);
-    cancelAnimationFrame(s.edgeRaf);
-    s.edgeDwell = 0;
-    s.edgeRaf = 0;
-    s.edgeDir = 0;
-  }
-
-  function pushSample() {
-    s.samples.push({ t: performance.now(), mag: s.mag, sel: s.sel });
-    if (s.samples.length > 30) s.samples.shift();
-  }
-
-  // When fingers lift, the tracker animates delta toward 0 or 1 quickly.
-  // Use the selection from just before that burst so the list doesn't jump.
-  function settledSelection() {
-    const now = performance.now();
-    const list = s.samples;
-    for (let i = list.length - 1; i > 0; i--) {
-      const a = list[i - 1];
-      const b = list[i];
-      const dt = (b.t - a.t) / 1000;
-      const speed = dt > 0 ? Math.abs(b.mag - a.mag) / dt : 0;
-      if (speed < RELEASE_SPEED || now - b.t > 450) return b.sel;
-    }
-    return list.length ? list[0].sel : s.sel;
-  }
-
-  function finishHold() {
-    const sel = s.released ? s.sel : settledSelection();
-    s.holding = false;
-    stopEdgeScroll();
-    suppressUntil = performance.now() + 800;
-    const entry = s.entries[sel];
-    if (sel >= 0 && entry) {
-      if (s.sel !== sel) select(sel, true);
-      gBrowser.selectedBrowser.gotoIndex(entry.index);
-      commit();
-    }
+  function go(i) {
+    const entry = s?.entries[i];
+    if (!entry) return;
+    gBrowser.selectedBrowser.gotoIndex(entry.index);
+    commit();
+    close(120);
   }
 
   // ---- Lifecycle ------------------------------------------------------------
-  function teardown(delay = 0) {
+  function close(delay = 0) {
     const g = s;
     if (!g) return;
     s = null;
     clearTimeout(g.holdTimer);
-    clearTimeout(g.edgeDwell);
-    cancelAnimationFrame(g.edgeRaf);
     if (!g.root) return;
     setTimeout(() => {
       g.root.setAttribute("leaving", "true");
       setTimeout(() => g.root.remove(), 260);
     }, delay);
+    // Hand focus back to the page if the list still had it.
+    if (g.open && document.activeElement === g.bubble) gBrowser.selectedBrowser.focus();
   }
 
   function commit() {
@@ -505,18 +335,13 @@
   }
 
   function begin() {
-    teardown();
+    close();
     s = fresh();
   }
 
   function update(e) {
     if (!s) s = fresh();
-
-    if (s.holding) {
-      // Measure along the original direction only; crossing zero clamps.
-      onHoldMove(Math.max(0, e.delta * s.sign));
-      return;
-    }
+    if (s.open) return; // the list is up; the swipe no longer matters
 
     const mag = Math.abs(e.delta);
     s.mag = mag;
@@ -536,7 +361,6 @@
       setProgress(0);
       return;
     }
-    s.sign = Math.sign(e.delta);
 
     setProgress(Math.min(mag / ARM_AT, 1));
 
@@ -559,17 +383,20 @@
 
   function end() {
     if (!s) return;
-    if (s.holding) finishHold();
+    if (s.open) {
+      // Fingers lifted with the list up: keep it open for clicks/keys.
+      suppressUntil = performance.now() + 800;
+      return;
+    }
     // Leave a moment for a late MozSwipeGesture to mark the swipe committed.
-    teardown(s.committed ? 120 : 60);
+    close(s.committed ? 120 : 60);
   }
 
   function onSwipeCommitted(e) {
-    if ((s && s.holding) || performance.now() < suppressUntil) {
-      // We navigate to the picked entry ourselves; stop Firefox's plain Back.
+    if ((s && s.open) || performance.now() < suppressUntil) {
+      // The list is open: don't let Firefox go back on lift-off.
       e.preventDefault();
       e.stopPropagation();
-      if (s && s.holding) finishHold();
       return;
     }
     commit();
@@ -581,7 +408,7 @@
       dispatch(e);
     } catch (err) {
       console.error("Dia Swipe:", err);
-      teardown();
+      close();
     }
   }
 
@@ -599,6 +426,10 @@
       case "MozSwipeGesture":
         onSwipeCommitted(e);
         break;
+      case "TabSelect":
+      case "resize":
+        if (s?.open) close();
+        break;
     }
   }
 
@@ -607,11 +438,15 @@
   function init() {
     // Window capture runs before Firefox's own handler on gBrowser.tabbox.
     for (const type of EVENTS) window.addEventListener(type, handleEvent, true);
+    window.addEventListener("resize", handleEvent);
+    gBrowser.tabContainer.addEventListener("TabSelect", handleEvent);
     window.DiaSwipe = {
       buzz,
       uninit() {
         for (const type of EVENTS) window.removeEventListener(type, handleEvent, true);
-        teardown();
+        window.removeEventListener("resize", handleEvent);
+        gBrowser.tabContainer.removeEventListener("TabSelect", handleEvent);
+        close();
         delete window.DiaSwipe;
       },
     };

@@ -16,5 +16,11 @@
     "label": "Hold the swipe to open the history list",
     "type": "checkbox",
     "default": true
+  },
+  {
+    "property": "mod.diaswipe.clear_pinned_history",
+    "label": "Pinned tabs start with no back history when reopened, reset or restored after a restart",
+    "type": "checkbox",
+    "default": true
   }
 ]
